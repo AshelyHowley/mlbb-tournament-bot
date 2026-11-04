@@ -106,3 +106,4 @@ python -m pytest -q
 * Один экземпляр бота (long polling). Не запускайте две копии с одним токеном.
 
 "# mlbb-tournamentKim-bot" 
+"# mlbb-tournament-bot" 
