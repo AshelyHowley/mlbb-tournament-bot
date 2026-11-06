@@ -54,7 +54,7 @@ async def snapshot_display(conn, tournament_id: int) -> None:
             SELECT username FROM users WHERE telegram_id = team_members.user_id
         ), display_full_name = (
             SELECT full_name FROM users WHERE telegram_id = team_members.user_id
-        ) WHERE tournament_id = $1
+        ) WHERE team_id IN (SELECT id FROM teams WHERE tournament_id = $1)
         """,
         tournament_id,
     )
