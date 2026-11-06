@@ -47,19 +47,22 @@ async def create_new_active(conn) -> int:
 
 
 async def snapshot_display(conn, tournament_id: int) -> None:
-    """Freeze team_members/solo_players display fields for this tournament - called once, at archive,
-    so history keeps showing names/usernames exactly as they were at that moment."""
+    """Freeze display fields for history."""
     await conn.execute(
         """
-        UPDATE team_members m SET display_username = u.username, display_full_name = u.full_name
-          FROM users u WHERE u.telegram_id = m.user_id AND m.tournament_id = $1
+        UPDATE team_members SET display_username = (
+            SELECT username FROM users WHERE telegram_id = team_members.user_id
+        ), display_full_name = (
+            SELECT full_name FROM users WHERE telegram_id = team_members.user_id
+        ) WHERE tournament_id = $1
         """,
         tournament_id,
     )
     await conn.execute(
         """
-        UPDATE solo_players s SET display_full_name = u.full_name
-          FROM users u WHERE u.telegram_id = s.user_id AND s.tournament_id = $1
+        UPDATE solo_players SET display_full_name = (
+            SELECT full_name FROM users WHERE telegram_id = solo_players.user_id
+        ) WHERE tournament_id = $1
         """,
         tournament_id,
     )
