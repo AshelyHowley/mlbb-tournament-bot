@@ -12,7 +12,7 @@ async def active_id(conn) -> Optional[int]:
 
 
 async def get_active(conn, lock: bool = False) -> dict:
-    return await conn.fetchrow(_SELECT + "WHERE status = 'active'" + (" FOR UPDATE" if lock else ""))
+    return await conn.fetchrow(_SELECT + "WHERE status = 'active'")
 
 
 async def get(conn, tournament_id: int) -> Optional[dict]:

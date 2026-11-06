@@ -385,39 +385,50 @@ async def bracket_random(cb: CallbackQuery, svc: Services) -> None:
             ids = [t["id"] for t in teams]
             random.shuffle(ids)
             n = len(ids)
-            # Use existing stages only: r16, r8, r4, semi, final
-            # For >16 teams, first stage is r16 with byes
-            if n <= 2:
-                stages_plan = [("final", 1)]
-            elif n <= 4:
-                stages_plan = [("semi", 2), ("final", 1)]
-            elif n <= 8:
-                stages_plan = [("r8", 4), ("r4", 2), ("semi", 1), ("final", 1)]
-            elif n <= 16:
-                stages_plan = [("r16", 8), ("r8", 4), ("r4", 2), ("semi", 1), ("final", 1)]
+            # Target: 16 for main bracket
+            main = 16 if n > 8 else (8 if n > 4 else 4)
+            extra = max(0, n - main)
+            # Play-in
+            if extra > 0:
+                play = ids[:extra * 2]
+                rest = ids[extra * 2:]
+                for i in range(0, len(play), 2):
+                    await conn.execute(
+                        "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) "
+                        "VALUES ('playin', $1, $2, (SELECT id FROM tournaments WHERE status = 'active'))",
+                        play[i], play[i+1],
+                    )
             else:
-                stages_plan = [("r16", 8), ("r8", 4), ("r4", 2), ("semi", 1), ("final", 1)]
-            first_code, first_count = stages_plan[0]
-            # Pad to fill first round
-            need = first_count * 2
-            padded = ids[:] + [None] * (need - n) if n < need else ids[:need]
-            random.shuffle(padded)
-            for i in range(0, need, 2):
-                a = padded[i] if i < len(padded) else None
-                b = padded[i+1] if i+1 < len(padded) else None
+                rest = ids[:]
+            # Stages without semi: r16/r8 -> r4 -> final -> finalist
+            if main == 16:
+                stages = [("r16", 8), ("r8", 4), ("r4", 2), ("final", 1)]
+            elif main == 8:
+                stages = [("r8", 4), ("r4", 2), ("final", 1)]
+            else:
+                stages = [("r4", 2), ("final", 1)]
+            first_code, first_cnt = stages[0]
+            slots = [None] * extra + rest
+            for i in range(0, main, 2):
+                a = slots[i] if i < len(slots) else None
+                b = slots[i+1] if i+1 < len(slots) else None
                 await conn.execute(
                     "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) "
                     "VALUES ($1, $2, $3, (SELECT id FROM tournaments WHERE status = 'active'))",
                     first_code, a, b,
                 )
-            # Rest
-            for code, cnt in stages_plan[1:]:
+            for code, cnt in stages[1:]:
                 for _ in range(cnt):
                     await conn.execute(
                         "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) "
                         "VALUES ($1, NULL, NULL, (SELECT id FROM tournaments WHERE status = 'active'))",
                         code,
                     )
+            # Finalist slot
+            await conn.execute(
+                "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) "
+                "VALUES ('finalist', NULL, NULL, (SELECT id FROM tournaments WHERE status = 'active'))"
+            )
     async with svc.team.pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT COALESCE(s.title, m.stage_code) AS stage, ta.name AS team_a, tb.name AS team_b, tw.name AS winner "
@@ -426,12 +437,12 @@ async def bracket_random(cb: CallbackQuery, svc: Services) -> None:
             "LEFT JOIN teams tb ON tb.id = m.team_b_id "
             "LEFT JOIN teams tw ON tw.id = m.winner_id "
             "WHERE m.tournament_id = (SELECT id FROM tournaments WHERE status = 'active') "
-            "ORDER BY CASE m.stage_code WHEN 'r16' THEN 1 WHEN 'r8' THEN 2 WHEN 'r4' THEN 3 WHEN 'semi' THEN 4 WHEN 'final' THEN 5 ELSE 9 END, m.id"
+            "ORDER BY CASE m.stage_code WHEN 'playin' THEN 0 WHEN 'r16' THEN 1 WHEN 'r8' THEN 2 WHEN 'r4' THEN 3 WHEN 'final' THEN 4 WHEN 'finalist' THEN 5 ELSE 9 END, m.id"
         )
     from app.services.bracket_image import render_bracket_image
     png = render_bracket_image([dict(r) for r in rows])
     if png:
-        await _send_bracket(cb.bot, cb.from_user.id, png, f"🏆 {n} команд")
+        await _send_bracket(cb.bot, cb.from_user.id, png, "🏆 Сетка")
     await show(cb, f"✅ Создано: {n} команд", akb.to_admin())
 
 
@@ -500,8 +511,6 @@ async def bracket_edit(cb: CallbackQuery, svc: Services) -> None:
     lines = ["✏️ <b>Редактирование сетки</b>\n"]
     kb_rows = []
     for r in rows:
-        if r["status"] == "finished":
-            continue
         win = ""
         if r["status"] == "finished":
             win = " ✅"
@@ -627,8 +636,6 @@ async def log_registrations(cb: CallbackQuery, svc: Services) -> None:
         return
     lines = ["📋 <b>История регистраций</b> (последние 30)\n"]
     for r in rows:
-        if r["status"] == "finished":
-            continue
         lines.append(f"{r['created_at'][:16]} | {r['action']} | {r['team_name'] or '—'} | id:{r['user_id']}")
         if r['details']:
             lines.append(f"  {r['details']}")
@@ -648,8 +655,6 @@ async def log_actions(cb: CallbackQuery, svc: Services) -> None:
         return
     lines = ["📜 <b>Логи действий</b> (последние 40)\n"]
     for r in rows:
-        if r["status"] == "finished":
-            continue
         uname = f"@{r['username']}" if r['username'] else f"id:{r['user_id']}"
         lines.append(f"{r['created_at'][:16]} | {uname} | {r['action']}")
     await show(cb, "\n".join(lines), akb.to_admin())
