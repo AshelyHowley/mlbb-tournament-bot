@@ -267,7 +267,7 @@ def finish_done() -> InlineKeyboardMarkup:
 
 
 def history_list(rows: Sequence, page: int, last: int) -> InlineKeyboardMarkup:
-    items = [[B(text=f"🏆 {r['completed_at'].strftime('%d.%m.%Y • %H:%M') if r['completed_at'] else '—'}", callback_data=f"hist:c:{r['id']}")] for r in rows]
+    items = [[B(text=f"🏆 {(r['completed_at'][:16].replace('T',' ') if isinstance(r['completed_at'], str) else r['completed_at'].strftime('%d.%m.%Y %H:%M')) if r['completed_at'] else '—'}", callback_data=f"hist:c:{r['id']}")] for r in rows]
     return kb(items + [pager("hist", page, last), [B(text="◀️ Админ-панель", callback_data="adm")]])
 
 
