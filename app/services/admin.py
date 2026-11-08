@@ -37,6 +37,12 @@ class AdminService:
     async def delete_team(self, team_id: int) -> None:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # Clear next_match_id references first
+                await conn.execute(
+                    "UPDATE matches SET next_match_id = NULL WHERE next_match_id IN "
+                    "(SELECT id FROM matches WHERE team_a_id = $1 OR team_b_id = $1 OR winner_id = $1)",
+                    team_id,
+                )
                 await conn.execute("DELETE FROM matches WHERE team_a_id = $1 OR team_b_id = $1 OR winner_id = $1", team_id)
                 await conn.execute("DELETE FROM team_members WHERE team_id = $1", team_id)
                 await conn.execute("DELETE FROM teams WHERE id = $1", team_id)

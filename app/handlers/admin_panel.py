@@ -456,95 +456,98 @@ async def _send_bracket(bot, chat_id, png, caption):
 
 @router.callback_query(F.data == "br:random")
 async def bracket_random(cb: CallbackQuery, svc: Services) -> None:
-    await cb.answer("Распределяю...")
-    import random
+    await cb.answer("Генерация сетки...")
     async with svc.team.pool.acquire() as conn:
-        for code, title, order in [("playin", "Отбор", 5), ("r16", "1/16", 10), ("r8", "1/8", 20), ("r4", "1/4", 30), ("semi", "Полуфинал", 40), ("final", "Финал", 50), ("finalist", "Финалист", 60)]:
-            await conn.execute("INSERT OR IGNORE INTO stages (code, title, sort_order) VALUES ($1, $2, $3)", code, title, order)
-    async with svc.team.pool.acquire() as conn:
-        async with conn.transaction():
-            teams = await conn.fetch(
-                "SELECT id, name FROM teams WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active') "
-                "AND name_norm NOT IN ('tbd_a','tbd_b','tbd_placeholder')"
-            )
-            if len(teams) < 2:
-                await show(cb, "ℹ️ Нужно минимум 2 команды.", akb.to_admin())
-                return
-            await conn.execute("DELETE FROM matches WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active')")
-            ids = [t["id"] for t in teams]
-            random.shuffle(ids)
-            n = len(ids)
-            # Main = largest power of 2 <= n
-            main = 1
-            while main * 2 <= n:
-                main *= 2
-            extra = n - main
-            # Play-in
-            playin_cnt = 0
-            if extra > 0:
-                play = ids[:extra * 2]
-                rest = ids[extra * 2:]
-                for i in range(0, len(play), 2):
-                    if i + 1 < len(play):
-                        await conn.execute(
-                            "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) VALUES ('playin', $1, $2, (SELECT id FROM tournaments WHERE status = 'active'))",
-                            play[i], play[i+1],
-                        )
-                        playin_cnt += 1
-            else:
-                rest = ids[:]
-            # First stage
-            smap = {2: "final", 4: "semi", 8: "r4", 16: "r8", 32: "r16"}
-            first = smap.get(main, "r16")
-            first_cnt = main // 2
-            # Fill first stage with remaining teams + play-in winners
-            slots = list(rest) + [None] * playin_cnt
-            while len(slots) < main:
-                slots.append(None)
-            random.shuffle(slots)
-            for i in range(0, len(slots), 2):
-                a = slots[i] if i < len(slots) else None
-                b = slots[i+1] if i+1 < len(slots) else None
-                await conn.execute(
-                    "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) VALUES ($1, $2, $3, (SELECT id FROM tournaments WHERE status = 'active'))",
-                    first, a, b,
-                )
-            # Next stages - create correct number
-            order = ["r16", "r8", "r4", "semi", "final"]
-            idx = order.index(first) + 1 if first in order else 0
-            cnt = first_cnt // 2
-            while idx < len(order) and cnt >= 1:
-                stage = order[idx]
-                for _ in range(cnt):
-                    await conn.execute(
-                        "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) VALUES ($1, NULL, NULL, (SELECT id FROM tournaments WHERE status = 'active'))",
-                        stage,
-                    )
-                cnt //= 2
-                idx += 1
-            # Finalist
+        rows = await conn.fetch("SELECT id, name FROM teams ORDER BY RANDOM()")
+        if not rows:
+            await cb.answer("Нет команд", show_alert=True)
+            return
+        teams = [(r["id"], r["name"]) for r in rows]
+        n = len(teams)
+        if n < 2:
+            await cb.answer("Минимум 2 команды", show_alert=True)
+            return
+
+        import random
+        random.shuffle(teams)
+
+        # Calculate bracket size (next power of 2)
+        size = 1
+        while size < n:
+            size *= 2
+        
+        # Pad with None for byes
+        while len(teams) < size:
+            teams.append(None)
+
+        # Build tree from leaves to root
+        # Each level is a list of match IDs
+        await conn.execute("DELETE FROM matches")
+        
+        # Determine stages from bottom to top
+        stages = []
+        s = size // 2
+        stage_names = {1: "final", 2: "semi", 4: "r4", 8: "r8", 16: "r16", 32: "r32"}
+        while s >= 1:
+            stages.append((stage_names.get(s, f"r{s}"), s))
+            s //= 2
+        
+        # Create matches level by level (from first round to final)
+        current_matches = []  # list of (match_id, team_a_id, team_b_id)
+        
+        # First round - assign teams
+        first_stage, first_count = stages[0]
+        for i in range(first_count):
+            ta = teams[i * 2]
+            tb = teams[i * 2 + 1] if i * 2 + 1 < len(teams) else None
+            ta_id = ta[0] if ta else None
+            tb_id = tb[0] if tb else None
             await conn.execute(
-                "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) VALUES ('finalist', NULL, NULL, (SELECT id FROM tournaments WHERE status = 'active'))"
+                "INSERT INTO matches (tournament_id, stage_code, team_a_id, team_b_id, status) VALUES (1, $1, $2, $3, 'pending')",
+                first_stage, ta_id, tb_id,
             )
+            mid = await conn.fetchval("SELECT last_insert_rowid()")
+            current_matches.append(mid)
+        
+        # Subsequent rounds - empty matches linked to previous
+        for stage_name, count in stages[1:]:
+            next_matches = []
+            for i in range(count):
+                await conn.execute(
+                    "INSERT INTO matches (tournament_id, stage_code, status) VALUES (1, $1, 'pending')",
+                    stage_name,
+                )
+                mid = await conn.fetchval("SELECT last_insert_rowid()")
+                next_matches.append(mid)
+                # Link two previous matches to this one
+                if i * 2 < len(current_matches):
+                    await conn.execute("UPDATE matches SET next_match_id = $1 WHERE id = $2", mid, current_matches[i * 2])
+                if i * 2 + 1 < len(current_matches):
+                    await conn.execute("UPDATE matches SET next_match_id = $1 WHERE id = $2", mid, current_matches[i * 2 + 1])
+            current_matches = next_matches
+        
+        # Finalist
+        await conn.execute(
+            "INSERT INTO matches (tournament_id, stage_code, status) VALUES (1, 'finalist', 'pending')"
+        )
+        fid = await conn.fetchval("SELECT last_insert_rowid()")
+        if current_matches:
+            await conn.execute("UPDATE matches SET next_match_id = $1 WHERE id = $2", fid, current_matches[0])
+
+    await cb.message.answer("Сетка создана!")
     async with svc.team.pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT COALESCE(s.title, m.stage_code) AS stage, m.stage_code, ta.name AS team_a, tb.name AS team_b, tw.name AS winner "
-            "FROM matches m LEFT JOIN stages s ON s.code = m.stage_code "
-            "LEFT JOIN teams ta ON ta.id = m.team_a_id LEFT JOIN teams tb ON tb.id = m.team_b_id LEFT JOIN teams tw ON tw.id = m.winner_id "
-            "WHERE m.tournament_id = (SELECT id FROM tournaments WHERE status = 'active') "
-            "ORDER BY CASE m.stage_code WHEN 'playin' THEN 0 WHEN 'r16' THEN 1 WHEN 'r8' THEN 2 WHEN 'r4' THEN 3 WHEN 'semi' THEN 4 WHEN 'final' THEN 5 WHEN 'finalist' THEN 6 ELSE 9 END, m.id"
+            "SELECT m.stage_code AS stage, ta.name AS team_a, tb.name AS team_b, tw.name AS winner "
+            "FROM matches m "
+            "LEFT JOIN teams ta ON ta.id = m.team_a_id "
+            "LEFT JOIN teams tb ON tb.id = m.team_b_id "
+            "LEFT JOIN teams tw ON tw.id = m.winner_id "
+            "WHERE m.tournament_id = 1 ORDER BY m.id"
         )
-        # Count for debug
-        counts = await conn.fetch("SELECT stage_code, COUNT(*) as c FROM matches WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active') GROUP BY stage_code")
-    debug = ", ".join([f"{r['stage_code']}:{r['c']}" for r in counts])
     from app.services.bracket_image import render_bracket_image
-    # Debug: show first 5 stages
-    sample = [f"{r.get('stage','?')}" for r in rows[:5]]
-    await cb.bot.send_message(cb.from_user.id, f"Stages: {sample}\nTotal rows: {len(rows)}")
     png = render_bracket_image([dict(r) for r in rows])
     if png:
-        await _send_bracket(cb.bot, cb.from_user.id, png, f"🏆 {n}")
-    await show(cb, f"DEBUG: n={n} main={main} playin={playin_cnt}\n{debug}", akb.to_admin())
+        await _send_bracket(cb.bot, cb.from_user.id, png, "🏆 Сетка создана")
 
 
 @router.callback_query(F.data.regexp(r"^br:pick:\d+$"))
@@ -646,41 +649,19 @@ async def bracket_win(cb: CallbackQuery, svc: Services) -> None:
                 "UPDATE matches SET winner_id = $2, status = 'finished', finished_at = datetime('now') WHERE id = $1",
                 mid, wid,
             )
-            nxt = next_stage.get(m["stage_code"])
-            if nxt:
-                tbd = await conn.fetchval("SELECT id FROM teams WHERE name_norm = 'tbd_placeholder' LIMIT 1")
-                # Position: which match number in current stage
-                pos = await conn.fetchval(
-                    "SELECT COUNT(*) FROM matches WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active') "
-                    "AND stage_code = $1 AND id <= $2",
-                    m["stage_code"], mid,
-                )
-                # Next match index (0-based): pos//2
-                next_matches = await conn.fetch(
-                    "SELECT id, team_a_id, team_b_id FROM matches "
-                    "WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active') AND stage_code = $1 "
-                    "ORDER BY id",
-                    nxt,
-                )
-                if next_matches:
-                    # Find first match with an empty slot
-                    placed = False
-                    for nm in next_matches:
-                        if nm["team_a_id"] is None:
-                            await conn.execute("UPDATE matches SET team_a_id = $2 WHERE id = $1", nm["id"], wid)
-                            placed = True
-                            break
-                        elif nm["team_b_id"] is None:
-                            await conn.execute("UPDATE matches SET team_b_id = $2 WHERE id = $1", nm["id"], wid)
-                            placed = True
-                            break
-                    if not placed:
-                        # All full — skip (shouldn't happen in correct bracket)
-                        pass
+            # Use next_match_id to advance winner
+            next_mid = await conn.fetchval("SELECT next_match_id FROM matches WHERE id = $1", mid)
+            if next_mid:
+                nm = await conn.fetchrow("SELECT team_a_id, team_b_id FROM matches WHERE id = $1", next_mid)
+                if nm:
+                    if nm["team_a_id"] is None:
+                        await conn.execute("UPDATE matches SET team_a_id = $2 WHERE id = $1", next_mid, wid)
+                    elif nm["team_b_id"] is None:
+                        await conn.execute("UPDATE matches SET team_b_id = $2 WHERE id = $1", next_mid, wid)
     # Regenerate bracket image
     async with svc.team.pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT s.title AS stage, ta.name AS team_a, tb.name AS team_b, tw.name AS winner "
+            "SELECT m.stage_code AS stage, ta.name AS team_a, tb.name AS team_b, tw.name AS winner "
             "FROM matches m JOIN stages s ON s.code = m.stage_code "
             "LEFT JOIN teams ta ON ta.id = m.team_a_id "
             "LEFT JOIN teams tb ON tb.id = m.team_b_id "
@@ -689,9 +670,6 @@ async def bracket_win(cb: CallbackQuery, svc: Services) -> None:
             "ORDER BY s.sort_order, m.id"
         )
     from app.services.bracket_image import render_bracket_image
-    # Debug: show first 5 stages
-    sample = [f"{r.get('stage','?')}" for r in rows[:5]]
-    await cb.bot.send_message(cb.from_user.id, f"Stages: {sample}\nTotal rows: {len(rows)}")
     png = render_bracket_image([dict(r) for r in rows])
     if png:
         from aiogram.types import BufferedInputFile
@@ -788,9 +766,6 @@ async def bracket_refresh(cb: CallbackQuery, svc: Services) -> None:
             "ORDER BY CASE m.stage_code WHEN 'playin' THEN 0 WHEN 'r16' THEN 1 WHEN 'r8' THEN 2 WHEN 'r4' THEN 3 WHEN 'semi' THEN 4 WHEN 'final' THEN 5 ELSE 9 END, m.id"
         )
     from app.services.bracket_image import render_bracket_image
-    # Debug: show first 5 stages
-    sample = [f"{r.get('stage','?')}" for r in rows[:5]]
-    await cb.bot.send_message(cb.from_user.id, f"Stages: {sample}\nTotal rows: {len(rows)}")
     png = render_bracket_image([dict(r) for r in rows])
     if png:
         from aiogram.types import BufferedInputFile

@@ -1,105 +1,123 @@
-"""Bracket image."""
+"""Bracket image - Sun Straik style."""
 from io import BytesIO
-from typing import Sequence
 try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:
     Image = None
 
 def _f(sz):
-    try: return ImageFont.truetype("arial.ttf", sz)
-    except: return ImageFont.load_default()
+    for name in ["segoeui.ttf", "arial.ttf", "calibri.ttf"]:
+        try: return ImageFont.truetype(name, sz)
+        except: pass
+    return ImageFont.load_default()
 
-def render_bracket_image(matches: Sequence[dict], title: str = "Турнир") -> bytes | None:
-    if Image is None or not matches: return None
-    
-    order = ["playin", "r16", "r8", "r4", "semi", "final", "finalist"]
-    labs = {"playin": "ОТБОР", "r16": "1/16", "r8": "1/8", "r4": "1/4", "semi": "1/2", "final": "ФИНАЛ", "finalist": "ФИНАЛИСТ"}
-    cmap = {"Отбор": "playin", "1/16": "r16", "1/8": "r8", "1/4": "r4", "Полуфинал": "semi", "1/2": "semi", "Финал": "final", "Финалист": "finalist"}
-    
+def render_bracket_image(matches: list[dict], title: str = "Турнир", subtitle: str = "Single Elimination") -> bytes:
+    # Layout
+    ML, MR, MT, MB = 60, 60, 90, 60
+    COL = 240
+    SW, SH = 170, 22
+    PH, GAP = 48, 12
+    # Colors
+    BG = (26, 28, 34)
+    FILL = (38, 100, 120)
+    FILL_U = (50, 55, 65)
+    LN = (90, 95, 105)
+    TXT = (230, 235, 240)
+    TXT_DIM = (150, 155, 165)
+    ICON = (70, 150, 170)
+    STAGE = {"playin": "ОТБОР", "r16": "1/16", "r8": "1/8", "r4": "1/4", "semi": "1/2", "final": "ФИНАЛ", "finalist": "ФИНАЛИСТ"}
+    if not matches: matches = []
+    all_stages = ["playin", "r16", "r8", "r4", "semi", "final", "finalist"]
     by = {}
     for m in matches:
-        stage = str(m.get("stage") or "").strip()
-        code = cmap.get(stage, stage.lower())
-        by.setdefault(code, []).append(m)
-    
-    stages = [s for s in order if s in by]
-    if not stages: return None
-    
-    SW, SH = 140, 16
-    PH = SH * 2 + 4
-    GAP = 8
-    COL = SW + 36
-    ML, MT = 16, 36
-    
-    # Height = max matches in any stage
-    max_n = max(len(by[s]) for s in stages)
-    H = MT + max_n * (PH + GAP) + 30
-    W = ML + len(stages) * COL + 16
-    
-    img = Image.new("RGB", (W, H), (18, 20, 26))
+        st = m.get("stage_code") or m.get("stage", "r8")
+        if st not in by: by[st] = []
+        by[st].append(m)
+    stages = [s for s in all_stages if s in by]
+    if not stages:
+        stages = ["r8"]
+        by["r8"] = []
+    n_col = len(stages)
+    max_n = max((len(by.get(s, [])) for s in stages), default=1)
+    W = ML + n_col * COL + MR
+    H = MT + max_n * (PH + GAP) + MB
+    img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
-    fnt = _f(8)
-    d.text((W//2 - 20, 6), title, fill=(235, 235, 240), font=_f(11))
-    
-    FILL, FILL_U = (42, 90, 108), (32, 36, 44)
-    LN = (55, 62, 75)
-    
+    fnt = _f(11)
+    fnt_t = _f(16)
+    fnt_s = _f(10)
+    # Title
+    d.text((W//2, 18), title, fill=TXT, font=fnt_t, anchor="mt")
+    d.text((W//2, 38), subtitle, fill=TXT_DIM, font=fnt_s, anchor="mt")
+    positions = {}
+    # Draw slots
     for si, st in enumerate(stages):
-        x = ML + si * COL
-        d.text((x, MT - 12), labs.get(st, st), fill=(160, 165, 175), font=_f(7))
         matches_st = by[st]
         n = len(matches_st)
         total_h = n * (PH + GAP) - GAP
         start_y = MT + (max_n * (PH + GAP) - total_h) // 2
-        
+        x = ML + si * COL
+        positions[st] = []
+        # Stage label
+        d.text((x + SW//2, MT - 18), STAGE.get(st, st.upper()) + " >", fill=TXT_DIM, font=fnt, anchor="mt")
+        d.line([(x, MT - 5), (x + SW, MT - 5)], fill=(60, 65, 75), width=1)
         for i, m in enumerate(matches_st):
             y0 = start_y + i * (PH + GAP)
-            
+            cy = y0 + PH // 2
+            positions[st].append((x, cy, y0))
+            a = (m.get("team_a") or "?")[:16]
+            b = (m.get("team_b") or "?")[:16]
             if st == "finalist":
-                d.rounded_rectangle((x, y0, x+SW, y0+SH), 2, fill=FILL_U, outline=LN)
-                d.text((x+3, y0+2), m.get("winner") or "?", fill=(200,200,205), font=fnt)
-                continue
-            
-            a = str(m.get("team_a") or "?")[:12]
-            b = str(m.get("team_b") or "?")[:12]
-            if a in ("None", "TBD"): a = "?"
-            if b in ("None", "TBD"): b = "?"
-            
-            d.rounded_rectangle([x, y0, x+SW, y0+SH], 2, fill=FILL if a != "?" else FILL_U)
-            d.text((x+3, y0+1), a, fill=(220,225,230), font=fnt)
-            d.rounded_rectangle([x, y0+SH+2, x+SW, y0+PH-2], 2, fill=FILL if b != "?" else FILL_U)
-            d.text((x+3, y0+SH+3), b, fill=(200,205,210), font=fnt)
-            pass  # lines drawn separately
-    
-    # Draw connecting lines
+                winner = m.get("winner") or (a if a != "?" else "?")
+                d.rounded_rectangle([x, y0, x+SW, y0+PH-4], 4, fill=FILL if winner != "?" else FILL_U)
+                if winner != "?":
+                    d.ellipse([x+4, y0+PH//2-8, x+20, y0+PH//2+8], fill=ICON)
+                d.text((x+24, y0+PH//2-6), winner, fill=TXT, font=fnt)
+            else:
+                # Team A
+                d.rounded_rectangle([x, y0, x+SW, y0+SH], 4, fill=FILL if a != "?" else FILL_U)
+                if a != "?":
+                    d.ellipse([x+4, y0+3, x+18, y0+17], fill=ICON)
+                d.text((x+22, y0+3), a, fill=TXT, font=fnt)
+                # Team B
+                d.rounded_rectangle([x, y0+SH+2, x+SW, y0+PH-2], 4, fill=FILL if b != "?" else FILL_U)
+                if b != "?":
+                    d.ellipse([x+4, y0+SH+5, x+18, y0+SH+19], fill=ICON)
+                d.text((x+22, y0+SH+5), b, fill=TXT, font=fnt)
+    # Draw lines
     for si, st in enumerate(stages[:-1]):
         next_st = stages[si + 1]
-        matches_st = by[st]
-        next_matches = by.get(next_st, [])
-        n = len(matches_st)
-        next_n = len(next_matches)
-        if next_n == 0: continue
-        x = ML + si * COL
-        nx = ML + (si + 1) * COL
-        total_h = n * (PH + GAP) - GAP
-        next_total_h = next_n * (PH + GAP) - GAP
-        start_y = MT + (max_n * (PH + GAP) - total_h) // 2
-        next_start_y = MT + (max_n * (PH + GAP) - next_total_h) // 2
-        for i in range(0, n, 2):
-            next_i = i // 2
-            if next_i >= next_n: break
-            y0 = start_y + i * (PH + GAP)
-            cy1 = y0 + PH // 2
-            cy2 = start_y + (i + 1) * (PH + GAP) + PH // 2 if i + 1 < n else cy1
-            ny = next_start_y + next_i * (PH + GAP) + PH // 2
-            mid_x = x + SW + 16
-            d.line([(x + SW, cy1), (mid_x, cy1)], fill=LN)
-            if cy2 != cy1:
-                d.line([(x + SW, cy2), (mid_x, cy2)], fill=LN)
-                d.line([(mid_x, min(cy1, cy2)), (mid_x, max(cy1, cy2))], fill=LN)
-            d.line([(mid_x, ny), (nx - 2, ny)], fill=LN)
-    
+        if st not in positions or next_st not in positions: continue
+        pos = positions[st]
+        next_pos = positions[next_st]
+        n = len(pos)
+        next_n = len(next_pos)
+        if n == 0 or next_n == 0: continue
+        mid_x = pos[0][0] + SW + 25
+        if st == "playin":
+            next_matches = by.get(next_st, [])
+            empty_idx = [i for i, m in enumerate(next_matches) if (m.get("team_a") or "?") == "?" or (m.get("team_b") or "?") == "?"]
+            if not empty_idx: empty_idx = list(range(next_n - min(n, next_n), next_n))
+            for i, (x, cy, _) in enumerate(pos):
+                if i < len(empty_idx) and empty_idx[i] < next_n:
+                    nx, ny, _ = next_pos[empty_idx[i]]
+                    d.line([(x + SW, cy), (mid_x, cy)], fill=LN, width=1)
+                    d.line([(mid_x, cy), (mid_x, ny)], fill=LN, width=1)
+                    d.line([(mid_x, ny), (nx - 2, ny)], fill=LN, width=1)
+        else:
+            for p_idx in range(min(n // 2, next_n)):
+                i = p_idx * 2
+                x1, cy1, _ = pos[i]
+                cy2 = pos[i+1][1] if i+1 < n else cy1
+                nx, ny, _ = next_pos[p_idx]
+                mid_y = (cy1 + cy2) // 2
+                d.line([(x1 + SW, cy1), (mid_x, cy1)], fill=LN, width=1)
+                if i+1 < n:
+                    d.line([(pos[i+1][0] + SW, cy2), (mid_x, cy2)], fill=LN, width=1)
+                    d.line([(mid_x, cy1), (mid_x, cy2)], fill=LN, width=1)
+                d.line([(mid_x, mid_y), (mid_x + 12, mid_y)], fill=LN, width=1)
+                d.line([(mid_x + 12, mid_y), (mid_x + 12, ny)], fill=LN, width=1)
+                d.line([(mid_x + 12, ny), (nx - 2, ny)], fill=LN, width=1)
     buf = BytesIO()
     img.save(buf, "PNG")
     return buf.getvalue()
