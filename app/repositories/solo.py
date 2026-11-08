@@ -7,7 +7,7 @@ from typing import Optional
 _ACTIVE = "(SELECT id FROM tournaments WHERE status = 'active')"
 
 
-async def insert(conn, user_id: int, username: Optional[str], norm: Optional[str], role: str) -> None:
+async def insert(conn, user_id: int, username: Optional[str], norm: Optional[str], role: str, stars: int = 0) -> None:
     # Clear any previous solo registration for this user (any tournament)
     await conn.execute("DELETE FROM solo_players WHERE user_id = $1", user_id)
     tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active' LIMIT 1")
@@ -15,8 +15,8 @@ async def insert(conn, user_id: int, username: Optional[str], norm: Optional[str
         await conn.execute("INSERT INTO tournaments (status) VALUES ('active')")
         tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active' LIMIT 1")
     await conn.execute(
-        "INSERT INTO solo_players (user_id, username, username_norm, role, tournament_id) VALUES ($1,$2,$3,$4,$5)",
-        user_id, username, norm, role, tid,
+        "INSERT INTO solo_players (user_id, username, username_norm, role, tournament_id, stars) VALUES ($1,$2,$3,$4,$5,$6)",
+        user_id, username, norm, role, tid, stars,
     )
 
 

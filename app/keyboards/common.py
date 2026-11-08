@@ -22,6 +22,7 @@ def main_menu(cfg: Config, reg: Optional[MyRegistration], is_admin: bool) -> Inl
         if reg.has_team:
             rows.append([B(text="👥 Моя команда", callback_data="team")])
     rows.append([B(text="🏆 Турнирная сетка", callback_data="bracket")])
+    rows.append([B(text="🏅 Зал славы", callback_data="hof")])
     rows.append([B(text="📢 Канал", url=cfg.channel_url), B(text="💬 Чат", url=cfg.chat_url)])
     if is_admin:
         rows.append([B(text="🛠 Админ-панель", callback_data="adm")])
@@ -84,3 +85,15 @@ def my_reg_menu(can_unregister: bool = False) -> InlineKeyboardMarkup:
         rows.append([B(text="❌ Сняться с регистрации", callback_data="me:unregister")])
     rows.append([B(text="◀️ В меню", callback_data="menu")])
     return kb(rows)
+
+
+def roles_multi(selected: list[str] | None = None) -> InlineKeyboardMarkup:
+    selected = selected or []
+    rows = []
+    for r in ROLES:
+        mark = "✅ " if r in selected else ""
+        rows.append([B(text=f"{mark}{r}", callback_data=f"reg:role:{r}")])
+    rows.append([B(text="🌟 Все роли", callback_data="reg:role:ALL")])
+    rows.append([B(text="✅ Готово", callback_data="reg:role:done")])
+    rows.append([B(text="◀️ Назад", callback_data="reg:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

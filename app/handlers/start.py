@@ -108,3 +108,20 @@ async def cb_unregister(cb: CallbackQuery, svc: Services) -> None:
                 pass
     text, markup = await menu_view(svc, uid)
     await show(cb, "✅ Вы сняты с регистрации.\n\n" + text, markup)
+
+@router.callback_query(F.data == "hof")
+async def hall_of_fame(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer()
+    async with svc.team.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, completed_at FROM tournaments WHERE status != 'active' ORDER BY completed_at DESC LIMIT 20"
+        )
+    if not rows:
+        await show(cb, "🏅 <b>Зал славы</b>\n\nПока нет завершённых турниров.", kbs.back_to_menu())
+        return
+    lines = ["🏅 <b>Зал славы</b>\n"]
+    for r in rows:
+        dt = r["completed_at"][:16] if r["completed_at"] else "—"
+        lines.append(f"🏆 Турнир #{r['id']} — {dt}")
+    await show(cb, "\n".join(lines), kbs.back_to_menu())
+

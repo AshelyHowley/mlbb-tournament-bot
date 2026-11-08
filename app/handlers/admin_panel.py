@@ -689,3 +689,14 @@ async def bracket_refresh(cb: CallbackQuery, svc: Services) -> None:
         from aiogram.types import BufferedInputFile
         await _send_bracket(cb.bot, cb.from_user.id, png, "🏆 Текущая сетка")
     await bracket_edit(cb, svc)
+
+@router.callback_query(F.data == "adm:tdelall")
+async def teams_delete_all(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer()
+    async with svc.team.pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM matches WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active')")
+            await conn.execute("DELETE FROM team_members WHERE team_id IN (SELECT id FROM teams WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active'))")
+            await conn.execute("DELETE FROM teams WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active')")
+    await show(cb, "✅ Все команды удалены.", akb.to_admin())
+

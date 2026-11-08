@@ -42,6 +42,7 @@ def teams_list(rows: Sequence, page: int, last: int) -> InlineKeyboardMarkup:
     items = [[B(text=r["name"][:40], callback_data=f"adm:tc:{r['id']}")] for r in rows]
     return kb(items + [
         [B(text="🎲 Собрать команды из соло", callback_data="rnd:solo")],
+        [B(text="🗑 Удалить все команды", callback_data="adm:tdelall")],
         pager("adm:t", page, last),
         [B(text="◀️ Админ-панель", callback_data="adm")],
     ])

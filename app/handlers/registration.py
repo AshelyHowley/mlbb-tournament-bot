@@ -30,6 +30,7 @@ class RegTeam(StatesGroup):
 
 class RegSolo(StatesGroup):
     role = State()
+    stars = State()
     confirm = State()
 
 
@@ -148,22 +149,51 @@ async def solo_begin(cb: CallbackQuery, state: FSMContext, svc: Services) -> Non
     if not await _guard(cb, state, svc):
         return
     await state.set_state(RegSolo.role)
-    await show(cb, "👤 <b>Соло-регистрация</b>\n\nВыберите вашу роль:", kbs.roles())
+    await state.update_data(roles=[])
+    await show(cb, "👤 <b>Соло-регистрация</b>\n\nВыберите роли (можно несколько):", kbs.roles_multi())
 
 
 @router.callback_query(RegSolo.role, F.data.startswith("reg:role:"))
 async def solo_role(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
-    role = cb.data.split(":", 2)[2]
-    if role not in ROLES:
+    data = await state.get_data()
+    roles = data.get("roles", [])
+    choice = cb.data.split(":", 2)[2]
+    if choice == "ALL":
+        roles = list(ROLES)
+    elif choice == "done":
+        if not roles:
+            await cb.answer("Выберите хотя бы одну роль", show_alert=True)
+            return
+        await state.update_data(roles=roles)
+        await state.set_state(RegSolo.stars)
+        await show(cb, "⭐ Сколько звёзд в Максе?\nНапишите число (например 1000):", kbs.nav())
         return
-    await state.update_data(role=role)
+    elif choice in ROLES:
+        if choice in roles:
+            roles.remove(choice)
+        else:
+            roles.append(choice)
+    await state.update_data(roles=roles)
+    await show(cb, "👤 <b>Соло-регистрация</b>\n\nВыберите роли (можно несколько):", kbs.roles_multi(roles))
+
+
+@router.message(RegSolo.stars)
+async def solo_stars(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text.isdigit() or not (0 <= int(text) <= 10000):
+        await message.answer("Введите число от 0 до 10000")
+        return
+    await state.update_data(stars=int(text))
+    data = await state.get_data()
+    roles = data.get("roles", [])
     await state.set_state(RegSolo.confirm)
-    await show(
-        cb,
-        f"📋 <b>Проверьте данные</b>\n\nTelegram: {person(cb.from_user.full_name, cb.from_user.username, cb.from_user.id)}\n"
-        f"Роль: <b>{esc(role)}</b>",
-        kbs.confirm_reg(),
+    await message.answer(
+        f"📋 <b>Проверьте данные</b>\n\n"
+        f"Telegram: {person(message.from_user.full_name, message.from_user.username, message.from_user.id)}\n"
+        f"Роли: <b>{', '.join(roles)}</b>\n"
+        f"Звёзды: <b>{text}</b>",
+        reply_markup=kbs.confirm_reg(),
     )
 
 
@@ -187,7 +217,8 @@ async def reg_back(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
         await show(cb, NAME_PROMPT, kbs.nav(back=False))
     elif cur == RegSolo.confirm.state:
         await state.set_state(RegSolo.role)
-        await show(cb, "👤 <b>Соло-регистрация</b>\n\nВыберите вашу роль:", kbs.roles())
+        await state.update_data(roles=[])
+    await show(cb, "👤 <b>Соло-регистрация</b>\n\nВыберите роли (можно несколько):", kbs.roles_multi())
     else:
         await _to_menu(cb, state, svc)
 
@@ -235,7 +266,10 @@ async def _finalize(cb: CallbackQuery, state: FSMContext, svc: Services) -> None
             view = await svc.team.create_team(user, data["name"], data.get("role", "captain"),
                                               is_admin=svc.cfg.is_bot_admin(user.id))
         else:
-            reg = await svc.reg.register_solo(user, data["role"])
+            roles = data.get("roles", [data.get("role", "EXP")])
+            role_str = ",".join(roles) if isinstance(roles, list) else roles
+            stars = data.get("stars", 0)
+            reg = await svc.reg.register_solo(user, role_str, stars)
     except TeamNameTaken as e:
         await state.set_state(RegTeam.name)
         await show(cb, e.user_message + "\nВведите другое название команды:", kbs.nav(back=False))
