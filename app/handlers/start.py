@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.context import Services
+from app.keyboards import common as kbs
 from app.handlers.common import format_solo, format_team, menu_view, show
 from app.keyboards.common import back_to_menu, my_reg_menu
 from app.handlers.team import card_markup
@@ -109,19 +110,67 @@ async def cb_unregister(cb: CallbackQuery, svc: Services) -> None:
     text, markup = await menu_view(svc, uid)
     await show(cb, "✅ Вы сняты с регистрации.\n\n" + text, markup)
 
+HOF_TEXT = """〰️Чат Mobile Legends/ Tournament Chat 〰️
+
+❤️‍🔥<b>Зал Славы</b>❤️‍🔥
+
+🤩<b>10.2025</b> 🍁
+🌎Турнир "Первый"
+🦿Тип боёв "смешанный"
+🏆Приз 5000р
+🏆Победитель @Stepanova7
+
+🦌<b>11.2025</b>🦌
+🌎Турнир "Смежный"
+🦿Тип боёв "5*5"
+🏆Приз 5000 алмазов
+🏆Победитель Команда нашего чата, капитан @Kim4D
+
+👋<b>12.2025</b>👋
+🌎Турнир "Новогодний Хаос"
+🦿Тип боёв "смешанный"
+🏆Приз 6500р
+🏆Победитель @Stepanova7
+
+🪙 <b>02.2026</b> 🪙
+🌎Турнир "Зимний"
+🦿Тип боёв "2*2"
+🏆Приз 3000р
+🏆Победитель "Мы Едим Лошадей"
+
+🌸<b>05.2026</b>🌸
+🌎Турнир "Железный impakt"
+🦿Тип боёв "5*5"
+🏆Приз 5000р
+🏆Победитель "Krasavchiki"
+
+🌞<b>06.2026</b>🌞
+🌎Турнир "Battle Fury"
+🦿Тип боёв "5*5"
+🏆Приз 6000р
+🏆Победитель "Natus amittere"
+
+🌞<b>07.2026</b>🌞
+🌎Турнир "Кубок Огня"
+🦿Тип боёв "5*5"
+🏆Приз 6500р
+🏆Победитель "Dobeg squad"
+
+🌞<b>09.2026</b>🌞
+🌎Турнир "Sun Straike"
+🦿Тип боёв "5*5"
+🏆Приз 6000р
+🏆Победитель "Rakuzan"
+
+🌞<b>10.2026</b>🌞
+🌎Турнир "Sunset"
+🦿Тип боёв "5*5"
+🏆Приз 6000р
+🏆Победитель "APBE"
+"""
+
 @router.callback_query(F.data == "hof")
 async def hall_of_fame(cb: CallbackQuery, svc: Services) -> None:
     await cb.answer()
-    async with svc.team.pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, completed_at FROM tournaments WHERE status != 'active' ORDER BY completed_at DESC LIMIT 20"
-        )
-    if not rows:
-        await show(cb, "🏅 <b>Зал славы</b>\n\nПока нет завершённых турниров.", kbs.back_to_menu())
-        return
-    lines = ["🏅 <b>Зал славы</b>\n"]
-    for r in rows:
-        dt = r["completed_at"][:16] if r["completed_at"] else "—"
-        lines.append(f"🏆 Турнир #{r['id']} — {dt}")
-    await show(cb, "\n".join(lines), kbs.back_to_menu())
+    await show(cb, HOF_TEXT, kbs.back_to_menu())
 

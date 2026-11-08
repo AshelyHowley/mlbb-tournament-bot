@@ -139,3 +139,35 @@ async def reject(cb: CallbackQuery, svc: Services) -> None:
             await cb.bot.send_message(row["candidate_id"], "❌ Ваша заявка на роль заместителя отклонена.")
         except Exception:
             pass
+
+@router.callback_query(F.data == "dep:pick")
+async def pick_from_users(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer()
+    async with svc.team.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT telegram_id AS user_id, username, full_name FROM users ORDER BY full_name LIMIT 30"
+        )
+    if not rows:
+        await show(cb, "Нет участников.", akb.deputy_menu(0, 0))
+        return
+    from aiogram.types import InlineKeyboardButton as B, InlineKeyboardMarkup
+    buttons = [[B(text=f"{r['full_name'] or r['username'] or r['user_id']}", callback_data=f"dep:make:{r['user_id']}")] for r in rows]
+    buttons.append([B(text="◀️ Назад", callback_data="dep:menu")])
+    await show(cb, "🛡 Выберите участника для назначения заместителем:", InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@router.callback_query(F.data.regexp(r"^dep:make:\d{1,18}$"))
+async def make_deputy(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer()
+    uid = parse_int(cb.data.split(":")[2])
+    try:
+        await svc.deputies.approve(cb.from_user.id, uid)
+    except Exception as e:
+        await show(cb, f"Ошибка: {e}", akb.deputy_menu(0, 0))
+        return
+    await show(cb, "✅ Заместитель назначен.", akb.deputy_menu(0, 0))
+    try:
+        await cb.bot.send_message(uid, "🛡 Вас назначили заместителем турнира.")
+    except Exception:
+        pass
+

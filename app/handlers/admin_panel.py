@@ -18,6 +18,92 @@ router = Router(name="admin_panel")
 router.message.filter(IsStaff())
 router.callback_query.filter(IsStaff())
 
+@router.callback_query(F.data == "adm:tadd16")
+async def teams_add_16(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer("Добавляю...")
+    import random, string
+    added = 0
+    async with svc.team.pool.acquire() as conn:
+        tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        if not tid:
+            await conn.execute("INSERT INTO tournaments (status) VALUES ('active')")
+            tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        for i in range(16):
+            name = f"Test{random.randint(10000, 99999)}"
+            token = "".join(random.choices(string.ascii_letters + string.digits, k=12))
+            try:
+                cur = await conn.execute(
+                    "INSERT INTO teams (name, name_norm, invite_token, tournament_id) VALUES ($1, $2, $3, $4)",
+                    name, name.lower(), token, tid,
+                )
+                team_id = await conn.fetchval("SELECT last_insert_rowid()")
+                if team_id:
+                    await conn.execute(
+                        "INSERT INTO team_members (team_id, user_id, is_captain) VALUES ($1, $2, 1)",
+                        team_id, 1,
+                    )
+                added += 1
+            except Exception as e:
+                pass
+    await show(cb, f"✅ Добавлено {added} команд.", akb.to_admin())
+
+
+@router.callback_query(F.data == "adm:taddrnd")
+async def teams_add_random(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer("Добавляю...")
+    import random, string
+    count = random.choice([5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35])
+    added = 0
+    async with svc.team.pool.acquire() as conn:
+        tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        if not tid:
+            await conn.execute("INSERT INTO tournaments (status) VALUES ('active')")
+            tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        for i in range(count):
+            name = f"Rnd{random.randint(100000, 999999)}"
+            token = "".join(random.choices(string.ascii_letters + string.digits, k=12))
+            try:
+                cur = await conn.execute(
+                    "INSERT INTO teams (name, name_norm, invite_token, tournament_id) VALUES ($1, $2, $3, $4)",
+                    name, name.lower(), token, tid,
+                )
+                team_id = await conn.fetchval("SELECT last_insert_rowid()")
+                if team_id:
+                    await conn.execute(
+                        "INSERT INTO team_members (team_id, user_id, is_captain) VALUES ($1, $2, 1)",
+                        team_id, 1,
+                    )
+                added += 1
+            except Exception:
+                pass
+    await show(cb, f"✅ Добавлено {added} команд.", akb.to_admin())
+
+
+@router.callback_query(F.data == "adm:taddrnd")
+async def teams_add_random(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer("Добавляю...")
+    import random, string
+    count = random.choice([5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35])
+    added = 0
+    async with svc.team.pool.acquire() as conn:
+        tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        if not tid:
+            await conn.execute("INSERT INTO tournaments (status) VALUES ('active')")
+            tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        for i in range(count):
+            try:
+                name = f"Rnd{random.randint(10000, 99999)}"
+                token = "".join(random.choices(string.ascii_letters, k=8))
+                await conn.execute(
+                    "INSERT OR IGNORE INTO teams (name, name_norm, invite_token, tournament_id) VALUES ($1, $2, $3, $4)",
+                    name, name.lower(), token, tid,
+                )
+                added += 1
+            except Exception:
+                pass
+    await show(cb, f"✅ Добавлено {added} команд.", akb.to_admin())
+
+
 ADMIN_TITLE = "🛠 <b>Админ-панель</b>"
 
 
@@ -129,6 +215,7 @@ async def solo_card(cb: CallbackQuery, svc: Services) -> None:
     await show(
         cb,
         f"👤 <b>Соло-игрок</b>\nTelegram: {person(row['full_name'], row['username'], row['user_id'])}\nРоль: <b>{esc(row['role'])}</b>\n"
+        f"⭐ Звёзды: <b>{row.get('stars', 0)}</b>\n"
         f"Дата регистрации: {fmt_dt(row['created_at'], svc.cfg.timezone)}",
         akb.solo_card(uid),
     )
@@ -342,7 +429,7 @@ async def bracket_new(cb: CallbackQuery, svc: Services) -> None:
     async with svc.team.pool.acquire() as conn:
         teams = await conn.fetch(
             "SELECT id, name FROM teams WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active') "
-            "AND EXISTS (SELECT 1 FROM team_members m WHERE m.team_id = teams.id) ORDER BY name"
+            "ORDER BY name"
         )
     if len(teams) < 2:
         await show(cb, "ℹ️ Нужно минимум 2 команды для сетки.", akb.to_admin())
@@ -372,10 +459,12 @@ async def bracket_random(cb: CallbackQuery, svc: Services) -> None:
     await cb.answer("Распределяю...")
     import random
     async with svc.team.pool.acquire() as conn:
+        for code, title, order in [("playin", "Отбор", 5), ("r16", "1/16", 10), ("r8", "1/8", 20), ("r4", "1/4", 30), ("semi", "Полуфинал", 40), ("final", "Финал", 50), ("finalist", "Финалист", 60)]:
+            await conn.execute("INSERT OR IGNORE INTO stages (code, title, sort_order) VALUES ($1, $2, $3)", code, title, order)
+    async with svc.team.pool.acquire() as conn:
         async with conn.transaction():
             teams = await conn.fetch(
                 "SELECT id, name FROM teams WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active') "
-                "AND EXISTS (SELECT 1 FROM team_members m WHERE m.team_id = teams.id) "
                 "AND name_norm NOT IN ('tbd_a','tbd_b','tbd_placeholder')"
             )
             if len(teams) < 2:
@@ -385,65 +474,77 @@ async def bracket_random(cb: CallbackQuery, svc: Services) -> None:
             ids = [t["id"] for t in teams]
             random.shuffle(ids)
             n = len(ids)
-            # Target: 16 for main bracket
-            main = 16 if n > 8 else (8 if n > 4 else 4)
-            extra = max(0, n - main)
+            # Main = largest power of 2 <= n
+            main = 1
+            while main * 2 <= n:
+                main *= 2
+            extra = n - main
             # Play-in
+            playin_cnt = 0
             if extra > 0:
                 play = ids[:extra * 2]
                 rest = ids[extra * 2:]
                 for i in range(0, len(play), 2):
-                    await conn.execute(
-                        "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) "
-                        "VALUES ('playin', $1, $2, (SELECT id FROM tournaments WHERE status = 'active'))",
-                        play[i], play[i+1],
-                    )
+                    if i + 1 < len(play):
+                        await conn.execute(
+                            "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) VALUES ('playin', $1, $2, (SELECT id FROM tournaments WHERE status = 'active'))",
+                            play[i], play[i+1],
+                        )
+                        playin_cnt += 1
             else:
                 rest = ids[:]
-            # Stages without semi: r16/r8 -> r4 -> final -> finalist
-            if main == 16:
-                stages = [("r16", 8), ("r8", 4), ("r4", 2), ("final", 1)]
-            elif main == 8:
-                stages = [("r8", 4), ("r4", 2), ("final", 1)]
-            else:
-                stages = [("r4", 2), ("final", 1)]
-            first_code, first_cnt = stages[0]
-            slots = [None] * extra + rest
-            for i in range(0, main, 2):
+            # First stage
+            smap = {2: "final", 4: "semi", 8: "r4", 16: "r8", 32: "r16"}
+            first = smap.get(main, "r16")
+            first_cnt = main // 2
+            # Fill first stage with remaining teams + play-in winners
+            slots = list(rest) + [None] * playin_cnt
+            while len(slots) < main:
+                slots.append(None)
+            random.shuffle(slots)
+            for i in range(0, len(slots), 2):
                 a = slots[i] if i < len(slots) else None
                 b = slots[i+1] if i+1 < len(slots) else None
                 await conn.execute(
-                    "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) "
-                    "VALUES ($1, $2, $3, (SELECT id FROM tournaments WHERE status = 'active'))",
-                    first_code, a, b,
+                    "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) VALUES ($1, $2, $3, (SELECT id FROM tournaments WHERE status = 'active'))",
+                    first, a, b,
                 )
-            for code, cnt in stages[1:]:
+            # Next stages - create correct number
+            order = ["r16", "r8", "r4", "semi", "final"]
+            idx = order.index(first) + 1 if first in order else 0
+            cnt = first_cnt // 2
+            while idx < len(order) and cnt >= 1:
+                stage = order[idx]
                 for _ in range(cnt):
                     await conn.execute(
-                        "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) "
-                        "VALUES ($1, NULL, NULL, (SELECT id FROM tournaments WHERE status = 'active'))",
-                        code,
+                        "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) VALUES ($1, NULL, NULL, (SELECT id FROM tournaments WHERE status = 'active'))",
+                        stage,
                     )
-            # Finalist slot
+                cnt //= 2
+                idx += 1
+            # Finalist
             await conn.execute(
-                "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) "
-                "VALUES ('finalist', NULL, NULL, (SELECT id FROM tournaments WHERE status = 'active'))"
+                "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) VALUES ('finalist', NULL, NULL, (SELECT id FROM tournaments WHERE status = 'active'))"
             )
     async with svc.team.pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT COALESCE(s.title, m.stage_code) AS stage, ta.name AS team_a, tb.name AS team_b, tw.name AS winner "
+            "SELECT COALESCE(s.title, m.stage_code) AS stage, m.stage_code, ta.name AS team_a, tb.name AS team_b, tw.name AS winner "
             "FROM matches m LEFT JOIN stages s ON s.code = m.stage_code "
-            "LEFT JOIN teams ta ON ta.id = m.team_a_id "
-            "LEFT JOIN teams tb ON tb.id = m.team_b_id "
-            "LEFT JOIN teams tw ON tw.id = m.winner_id "
+            "LEFT JOIN teams ta ON ta.id = m.team_a_id LEFT JOIN teams tb ON tb.id = m.team_b_id LEFT JOIN teams tw ON tw.id = m.winner_id "
             "WHERE m.tournament_id = (SELECT id FROM tournaments WHERE status = 'active') "
-            "ORDER BY CASE m.stage_code WHEN 'playin' THEN 0 WHEN 'r16' THEN 1 WHEN 'r8' THEN 2 WHEN 'r4' THEN 3 WHEN 'final' THEN 4 WHEN 'finalist' THEN 5 ELSE 9 END, m.id"
+            "ORDER BY CASE m.stage_code WHEN 'playin' THEN 0 WHEN 'r16' THEN 1 WHEN 'r8' THEN 2 WHEN 'r4' THEN 3 WHEN 'semi' THEN 4 WHEN 'final' THEN 5 WHEN 'finalist' THEN 6 ELSE 9 END, m.id"
         )
+        # Count for debug
+        counts = await conn.fetch("SELECT stage_code, COUNT(*) as c FROM matches WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active') GROUP BY stage_code")
+    debug = ", ".join([f"{r['stage_code']}:{r['c']}" for r in counts])
     from app.services.bracket_image import render_bracket_image
+    # Debug: show first 5 stages
+    sample = [f"{r.get('stage','?')}" for r in rows[:5]]
+    await cb.bot.send_message(cb.from_user.id, f"Stages: {sample}\nTotal rows: {len(rows)}")
     png = render_bracket_image([dict(r) for r in rows])
     if png:
-        await _send_bracket(cb.bot, cb.from_user.id, png, "🏆 Сетка")
-    await show(cb, f"✅ Создано: {n} команд", akb.to_admin())
+        await _send_bracket(cb.bot, cb.from_user.id, png, f"🏆 {n}")
+    await show(cb, f"DEBUG: n={n} main={main} playin={playin_cnt}\n{debug}", akb.to_admin())
 
 
 @router.callback_query(F.data.regexp(r"^br:pick:\d+$"))
@@ -588,6 +689,9 @@ async def bracket_win(cb: CallbackQuery, svc: Services) -> None:
             "ORDER BY s.sort_order, m.id"
         )
     from app.services.bracket_image import render_bracket_image
+    # Debug: show first 5 stages
+    sample = [f"{r.get('stage','?')}" for r in rows[:5]]
+    await cb.bot.send_message(cb.from_user.id, f"Stages: {sample}\nTotal rows: {len(rows)}")
     png = render_bracket_image([dict(r) for r in rows])
     if png:
         from aiogram.types import BufferedInputFile
@@ -675,7 +779,7 @@ async def bracket_refresh(cb: CallbackQuery, svc: Services) -> None:
     await cb.answer("Обновляю...")
     async with svc.team.pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT COALESCE(s.title, m.stage_code) AS stage, ta.name AS team_a, tb.name AS team_b, tw.name AS winner "
+            "SELECT COALESCE(s.title, m.stage_code) AS stage, m.stage_code, ta.name AS team_a, tb.name AS team_b, tw.name AS winner "
             "FROM matches m LEFT JOIN stages s ON s.code = m.stage_code "
             "LEFT JOIN teams ta ON ta.id = m.team_a_id "
             "LEFT JOIN teams tb ON tb.id = m.team_b_id "
@@ -684,6 +788,9 @@ async def bracket_refresh(cb: CallbackQuery, svc: Services) -> None:
             "ORDER BY CASE m.stage_code WHEN 'playin' THEN 0 WHEN 'r16' THEN 1 WHEN 'r8' THEN 2 WHEN 'r4' THEN 3 WHEN 'semi' THEN 4 WHEN 'final' THEN 5 ELSE 9 END, m.id"
         )
     from app.services.bracket_image import render_bracket_image
+    # Debug: show first 5 stages
+    sample = [f"{r.get('stage','?')}" for r in rows[:5]]
+    await cb.bot.send_message(cb.from_user.id, f"Stages: {sample}\nTotal rows: {len(rows)}")
     png = render_bracket_image([dict(r) for r in rows])
     if png:
         from aiogram.types import BufferedInputFile
@@ -699,4 +806,82 @@ async def teams_delete_all(cb: CallbackQuery, svc: Services) -> None:
             await conn.execute("DELETE FROM team_members WHERE team_id IN (SELECT id FROM teams WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active'))")
             await conn.execute("DELETE FROM teams WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active')")
     await show(cb, "✅ Все команды удалены.", akb.to_admin())
+
+@router.callback_query(F.data == "adm:tadd16")
+async def teams_add_16(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer("Добавляю...")
+    import random, string
+    names = ["Alpha", "Beta", "Gamma", "Delta", "Echo", "Foxtrot", "Golf", "Hotel",
+             "India", "Juliet", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa"]
+    added = 0
+    async with svc.team.pool.acquire() as conn:
+        tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        if not tid:
+            await conn.execute("INSERT INTO tournaments (status) VALUES ('active')")
+            tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        for name in names:
+            try:
+                suffix = random.randint(100, 999)
+                full_name = f"{name}{suffix}"
+                token = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                await conn.execute(
+                    "INSERT INTO teams (name, name_norm, invite_token, tournament_id) VALUES ($1, $2, $3, $4)",
+                    full_name, full_name.lower(), token, tid,
+                )
+                added += 1
+            except Exception:
+                pass
+    await show(cb, f"✅ Добавлено {added} тестовых команд.", akb.to_admin())
+
+
+@router.callback_query(F.data == "adm:taddrnd")
+async def teams_add_random(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer("Добавляю...")
+    import random, string
+    count = random.choice([n for n in range(5, 36) if n % 2 == 1])
+    added = 0
+    async with svc.team.pool.acquire() as conn:
+        tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        if not tid:
+            await conn.execute("INSERT INTO tournaments (status) VALUES ('active')")
+            tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        for i in range(count):
+            try:
+                name = f"Rnd{random.randint(10000, 99999)}"
+                token = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                cur = await conn.execute(
+                    "INSERT INTO teams (name, name_norm, invite_token, tournament_id) VALUES ($1, $2, $3, $4)",
+                    name, name.lower(), token, tid,
+                )
+                team_id = await conn.fetchval("SELECT last_insert_rowid()")
+                if team_id:
+                    await conn.execute(
+                        "INSERT INTO team_members (team_id, user_id, is_captain) VALUES ($1, $2, 1)",
+                        team_id, 1,
+                    )
+                added += 1
+            except Exception:
+                pass
+    await show(cb, f"✅ Добавлено {added} случайных команд.", akb.to_admin())
+
+
+@router.callback_query(F.data == "adm:taddrnd")
+async def teams_add_random(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer("Добавляю...")
+    import random, string
+    count = random.choice([n for n in range(5, 36) if n % 2 == 1])
+    async with svc.team.pool.acquire() as conn:
+        async with conn.transaction():
+            tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+            if not tid:
+                await conn.execute("INSERT INTO tournaments (status) VALUES ('active')")
+                tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+            for i in range(count):
+                name = f"Rnd{random.randint(1000, 9999)}"
+                token = "".join(random.choices(string.ascii_letters, k=8))
+                await conn.execute(
+                    "INSERT INTO teams (name, name_norm, invite_token, tournament_id) VALUES ($1, $2, $3, $4)",
+                    name, name.lower(), token, tid,
+                )
+    await show(cb, f"✅ Добавлено {count} случайных команд.", akb.to_admin())
 

@@ -41,6 +41,7 @@ class MyRegistration:
     full_name: str = ""
     team_role: Optional[str] = None  # 'captain' | 'member' | 'registrar' | None
     solo: bool = False
+    stars: int = 0
 
     @property
     def plays(self) -> bool:
@@ -81,10 +82,12 @@ class RegistrationService:
         return MyRegistration(
             kind=kind, role=solo["role"] if solo else None, username=solo["username"] if solo else None,
             full_name=(solo["full_name"] or "") if solo else "", team_role=team_role, solo=solo is not None,
+            stars=solo["stars"] if solo and "stars" in solo.keys() else 0,
         )
 
-    async def register_solo(self, user: TgUser, role: str) -> MyRegistration:
-        if role not in ROLES:
+    async def register_solo(self, user: TgUser, role: str, stars: int = 0) -> MyRegistration:
+        roles_list = [r.strip() for r in role.split(",")] if "," in role else [role]
+        if not all(r in ROLES or r == "ALL" for r in roles_list):
             raise ValidationError("❌ Неизвестная роль.")
         norm = normalize_username(user.username)
         for attempt in range(_DEADLOCK_RETRIES):
@@ -99,10 +102,10 @@ class RegistrationService:
                             raise AlreadyRegistered("ℹ️ Вы уже зарегистрированы как соло-игрок.")
                         if await teams_repo.membership(conn, user.id):
                             raise AlreadyRegistered("ℹ️ Вы уже состоите в команде — соло-регистрация невозможна.")
-                        await solo_repo.insert(conn, user.id, norm, norm, role)
+                        await solo_repo.insert(conn, user.id, norm, norm, role, stars)
                         await log_registration(conn, user.id, 'solo', None, role)
                         await log_action(conn, user.id, user.username, 'solo_register', role)
-                        return MyRegistration(kind="solo", role=role, username=norm, full_name=user.full_name, solo=True)
+                        return MyRegistration(kind="solo", role=role, username=norm, full_name=user.full_name, solo=True, stars=stars)
             except Exception:
                 if attempt == _DEADLOCK_RETRIES - 1:
                     raise Conflict("⚠️ Сервер занят, повторите попытку.")

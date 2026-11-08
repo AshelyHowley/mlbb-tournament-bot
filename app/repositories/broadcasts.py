@@ -45,17 +45,16 @@ async def interrupt_stale(conn) -> int:
 
 
 async def recipients(conn, audience: str) -> list[int]:
-    """Telegram ids reachable by the bot, scoped to the CURRENTLY ACTIVE tournament (participants of an
-    archived tournament are not bothered by ongoing announcements). Audience is whitelisted by the
-    caller; the SQL below is static."""
     active = "(SELECT id FROM tournaments WHERE status = 'active')"
     parts = []
     if audience in ("captains", "all"):
-        parts.append(f"SELECT captain_id AS uid FROM teams WHERE tournament_id = {active}")
+        parts.append(f"SELECT captain_id AS uid FROM teams WHERE tournament_id = {active} AND captain_id IS NOT NULL")
     if audience in ("solo", "all"):
         parts.append(f"SELECT user_id AS uid FROM solo_players WHERE tournament_id = {active}")
     if audience == "all":
         parts.append(f"SELECT m.user_id AS uid FROM team_members m JOIN teams t ON t.id = m.team_id WHERE t.tournament_id = {active}")
-    sql = "SELECT DISTINCT r.uid FROM (" + " UNION ".join(parts) + ") r " \
-          "JOIN users u ON u.telegram_id = r.uid WHERE NOT u.is_blocked ORDER BY r.uid"
-    return [r["uid"] for r in await conn.fetch(sql)]
+    if not parts:
+        return []
+    sql = "SELECT DISTINCT r.uid FROM (" + " UNION ".join(parts) + ") r JOIN users u ON u.telegram_id = r.uid WHERE COALESCE(u.is_blocked, 0) = 0"
+    rows = await conn.fetch(sql)
+    return [r["uid"] for r in rows if r["uid"]]

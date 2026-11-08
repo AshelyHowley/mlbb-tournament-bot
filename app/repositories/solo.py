@@ -23,7 +23,7 @@ async def insert(conn, user_id: int, username: Optional[str], norm: Optional[str
 async def get(conn, user_id: int) -> Optional[dict]:
     """The user's solo registration in the ACTIVE tournament (an archived one no longer counts)."""
     return await conn.fetchrow(
-        "SELECT s.user_id, s.username, s.role, s.created_at, COALESCE(s.display_full_name, u.full_name) AS full_name "
+        "SELECT s.user_id, s.username, s.role, s.stars, s.created_at, COALESCE(s.display_full_name, u.full_name) AS full_name "
         "FROM solo_players s JOIN users u ON u.telegram_id = s.user_id WHERE s.user_id = $1 AND s.tournament_id = " + _ACTIVE,
         user_id,
     )
@@ -35,7 +35,7 @@ async def count(conn) -> int:
 
 async def list_page(conn, limit: int, offset: int) -> list[dict]:
     return await conn.fetch(
-        "SELECT s.user_id, s.username, s.role, COALESCE(s.display_full_name, u.full_name) AS full_name "
+        "SELECT s.user_id, s.username, s.role, s.stars, COALESCE(s.display_full_name, u.full_name) AS full_name "
         "FROM solo_players s JOIN users u ON u.telegram_id = s.user_id "
         "WHERE s.tournament_id = " + _ACTIVE + " ORDER BY s.created_at, s.user_id LIMIT $1 OFFSET $2",
         limit, offset,

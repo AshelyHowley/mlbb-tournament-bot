@@ -39,10 +39,13 @@ def tg_user(event: Union[Message, CallbackQuery]) -> TgUser:
     return TgUser(id=u.id, username=u.username, full_name=u.full_name or "")
 
 
+_last_bot_msg: dict[int, int] = {}
+
 async def show(event: Union[Message, CallbackQuery], text: str, markup: Optional[InlineKeyboardMarkup] = None) -> None:
-    """Edit the callback's message in place (falls back to a new message); answer plain messages."""
+    """Edit or send message, delete previous to keep chat clean."""
     if isinstance(event, CallbackQuery):
         msg = event.message
+        chat_id = event.from_user.id
         if isinstance(msg, Message):
             try:
                 await msg.edit_text(text, reply_markup=markup)
@@ -51,16 +54,34 @@ async def show(event: Union[Message, CallbackQuery], text: str, markup: Optional
                 if "message is not modified" in str(e):
                     return
             except TelegramAPIError:
-                log.warning("edit_text failed, sending new message")
-        await event.bot.send_message(event.from_user.id, text, reply_markup=markup)
+                pass
+        # Delete previous
+        prev = _last_bot_msg.get(chat_id)
+        if prev:
+            try:
+                await event.bot.delete_message(chat_id, prev)
+            except Exception:
+                pass
+        sent = await event.bot.send_message(chat_id, text, reply_markup=markup)
+        _last_bot_msg[chat_id] = sent.message_id
     else:
-        await event.answer(text, reply_markup=markup)
+        chat_id = event.chat.id
+        prev = _last_bot_msg.get(chat_id)
+        if prev:
+            try:
+                await event.bot.delete_message(chat_id, prev)
+            except Exception:
+                pass
+        sent = await event.answer(text, reply_markup=markup)
+        _last_bot_msg[chat_id] = sent.message_id
 
 
 def format_solo(reg: MyRegistration, user_id: int) -> str:
+    stars = getattr(reg, "stars", 0) or 0
+    stars_line = f"\n⭐ Звёзды: <b>{stars}</b>" if stars else ""
     return (
         "👤 <b>Ваша регистрация: соло</b>\n\n"
-        f"Telegram: {person(reg.full_name, reg.username, user_id)}\nРоль: <b>{esc(reg.role)}</b>\nСтатус: ✅ Зарегистрирован"
+        f"Telegram: {person(reg.full_name, reg.username, user_id)}\nРоль: <b>{esc(reg.role)}</b>{stars_line}\nСтатус: ✅ Зарегистрирован"
     )
 
 

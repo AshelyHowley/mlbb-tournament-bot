@@ -13,7 +13,6 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot.context import Services
 from app.handlers.common import format_team, menu_view, show, tg_user
-from app.handlers.registration import sub_message
 from app.keyboards import admin as akb
 from app.keyboards import common as ckb
 from app.keyboards import team as tkb
@@ -171,6 +170,7 @@ async def join_confirm(cb: CallbackQuery, svc: Services) -> None:
         return
     res = await svc.sub.check(user.id)
     if not res.ok:
+        from app.handlers.registration import sub_message
         await show(cb, sub_message(res), ckb.subscribe(svc.cfg, retry_cb=cb.data, cancel_cb="menu"))
         return
     try:
@@ -206,6 +206,7 @@ async def captain_confirm(cb: CallbackQuery, svc: Services) -> None:
         return
     res = await svc.sub.check(user.id)
     if not res.ok:
+        from app.handlers.registration import sub_message
         await show(cb, sub_message(res), ckb.subscribe(svc.cfg, retry_cb=cb.data, cancel_cb="menu"))
         return
     try:
@@ -515,3 +516,19 @@ async def leave_ok(cb: CallbackQuery, svc: Services) -> None:
     await show(cb, f"✅ Вы покинули команду «{esc(view.name)}».", ckb.back_to_menu())
     if view.captain_id:
         await _notify(svc, view.captain_id, f"ℹ️ {me.display} покинул(а) команду.\n\n👥 Состав: {view.size}/{MAX_TEAM_SIZE}")
+
+
+@router.callback_query(F.data == "sub:invite")
+async def sub_invite(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer()
+    view = await svc.team.view_for_user(cb.from_user.id)
+    if view is None or view.captain_id != cb.from_user.id:
+        await show(cb, "⛔ Только капитан может приглашать запасных.", tkb.back_to_team())
+        return
+    link = await svc.invite_link(view.invite_token)
+    await show(
+        cb,
+        f"🔗 Ссылка для запасного:\n<code>{link}</code>\n\n"
+        "Отправьте её игроку. После вступления отметьте его как запасного в составе.",
+        tkb.back_to_team(),
+    )

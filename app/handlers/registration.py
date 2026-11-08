@@ -25,6 +25,7 @@ router = Router(name="registration")
 class RegTeam(StatesGroup):
     name = State()
     role = State()
+    stars = State()
     confirm = State()
 
 
@@ -120,7 +121,9 @@ async def team_role(cb: CallbackQuery, state: FSMContext) -> None:
         return
     data = await state.get_data()
     await state.update_data(role=role)
-    await state.set_state(RegTeam.confirm)
+    await state.set_state(RegTeam.stars)
+    await show(cb, "⭐ Сколько звёзд суммарно у команды (все 5 игроков)?\nНапишите число:", kbs.nav())
+    return
     seats = 0 if role == "registrar" else 1
     await show(
         cb,
@@ -140,6 +143,25 @@ async def team_role(cb: CallbackQuery, state: FSMContext) -> None:
 @router.message(RegSolo.confirm)
 async def reg_wrong_input(message: Message) -> None:
     await message.answer("Пожалуйста, используйте кнопки или отправьте текст, как указано выше.")
+
+
+
+@router.message(RegTeam.stars)
+async def team_stars(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text.isdigit() or not (0 <= int(text) <= 50000):
+        await message.answer("Введите число от 0 до 50000")
+        return
+    await state.update_data(stars=int(text))
+    data = await state.get_data()
+    await state.set_state(RegTeam.confirm)
+    await message.answer(
+        f"📋 <b>Проверьте данные</b>\n\n"
+        f"Команда: <b>{data.get('name', '—')}</b>\n"
+        f"Ваша роль: {data.get('role', '—')}\n"
+        f"⭐ Звёзды команды: <b>{text}</b>",
+        reply_markup=kbs.confirm_reg(),
+    )
 
 
 # ---------------------------------------------------------------- solo flow
@@ -218,7 +240,7 @@ async def reg_back(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
     elif cur == RegSolo.confirm.state:
         await state.set_state(RegSolo.role)
         await state.update_data(roles=[])
-    await show(cb, "👤 <b>Соло-регистрация</b>\n\nВыберите роли (можно несколько):", kbs.roles_multi())
+        await show(cb, "👤 <b>Соло-регистрация</b>\n\nВыберите роли (можно несколько):", kbs.roles_multi())
     else:
         await _to_menu(cb, state, svc)
 

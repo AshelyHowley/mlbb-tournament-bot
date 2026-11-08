@@ -18,7 +18,7 @@ async def lock_user(conn, user_id: int) -> None:
 
 
 async def insert_team(
-    conn, name: str, name_norm: str, created_by: int, captain_id: Optional[int], token: str, captain_token: Optional[str]
+    conn, name: str, name_norm: str, created_by: int, captain_id: Optional[int], token: str, captain_token: Optional[str], stars: int = 0
 ) -> int:
     # Ensure active tournament exists
     tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active' LIMIT 1")
@@ -26,9 +26,9 @@ async def insert_team(
         await conn.execute("INSERT INTO tournaments (status) VALUES ('active')")
         tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active' LIMIT 1")
     return await conn.fetchval(
-        "INSERT INTO teams (name, name_norm, created_by, captain_id, invite_token, captain_invite_token, tournament_id) "
-        "VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
-        name, name_norm, created_by, captain_id, token, captain_token, tid,
+        "INSERT INTO teams (name, name_norm, created_by, captain_id, invite_token, captain_invite_token, tournament_id, stars) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
+        name, name_norm, created_by, captain_id, token, captain_token, tid, stars,
     )
 
 
@@ -150,12 +150,12 @@ async def set_captain_token(conn, team_id: int, token: str) -> bool:
 
 
 async def count(conn) -> int:
-    return await conn.fetchval(f"SELECT count(*) FROM teams t WHERE t.tournament_id = {_ACTIVE} AND EXISTS (SELECT 1 FROM team_members m WHERE m.team_id = t.id)")
+    return await conn.fetchval(f"SELECT count(*) FROM teams t WHERE t.tournament_id = {_ACTIVE} ")
 
 
 async def list_page(conn, limit: int, offset: int) -> list[dict]:
     return await conn.fetch(
-        f"SELECT t.id, t.name FROM teams t WHERE t.tournament_id = {_ACTIVE} AND EXISTS (SELECT 1 FROM team_members m WHERE m.team_id = t.id) ORDER BY t.created_at, t.id LIMIT $1 OFFSET $2",
+        f"SELECT t.id, t.name FROM teams t WHERE t.tournament_id = {_ACTIVE}  ORDER BY t.created_at, t.id LIMIT $1 OFFSET $2",
         limit, offset,
     )
 

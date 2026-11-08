@@ -43,6 +43,7 @@ def teams_list(rows: Sequence, page: int, last: int) -> InlineKeyboardMarkup:
     return kb(items + [
         [B(text="🎲 Собрать команды из соло", callback_data="rnd:solo")],
         [B(text="🗑 Удалить все команды", callback_data="adm:tdelall")],
+        [B(text="➕ 16 тестовых", callback_data="adm:tadd16"), B(text="🎲 Случайные", callback_data="adm:taddrnd")],
         pager("adm:t", page, last),
         [B(text="◀️ Админ-панель", callback_data="adm")],
     ])
@@ -63,7 +64,7 @@ def confirm_delete(ok_cb: str, cancel_cb: str) -> InlineKeyboardMarkup:
 
 
 def solo_list(rows: Sequence, page: int, last: int) -> InlineKeyboardMarkup:
-    items = [[B(text=f"{person_plain(r['full_name'], r['username'], r['user_id'])[:40]} — {r['role']}", callback_data=f"adm:sc:{r['user_id']}")] for r in rows]
+    items = [[B(text=f"{person_plain(r['full_name'], r['username'], r['user_id'])[:30]} — {r['role']} ⭐{r.get('stars', 0)}", callback_data=f"adm:sc:{r['user_id']}")] for r in rows]
     return kb(items + [pager("adm:s", page, last), [B(text="◀️ Админ-панель", callback_data="adm")]])
 
 
