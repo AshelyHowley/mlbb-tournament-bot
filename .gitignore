@@ -8,3 +8,8 @@ __pycache__/
 venv/
 logs/
 *.log
+
+# databases are live data: never deploy them from git (on Railway they live on a Volume)
+*.db
+*.db-wal
+*.db-shm

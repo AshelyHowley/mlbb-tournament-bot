@@ -88,6 +88,27 @@ def _read(env_file: Optional[Path], environ: Optional[Mapping[str, str]]) -> dic
     return {k: v.strip() for k, v in values.items() if k in _KEYS}
 
 
+VOLUME_ENV = "RAILWAY_VOLUME_MOUNT_PATH"  # Railway задаёт её сам, когда к сервису подключён Volume
+
+
+def place_on_volume(url: str, environ: Optional[Mapping[str, str]] = None) -> str:
+    """На Railway файлы контейнера стираются при каждом деплое. Если подключён Volume, а
+    DATABASE_URL указывает на относительный путь SQLite (./tournament.db), кладём базу на Volume,
+    иначе после каждого залива на GitHub все регистрации пропадали бы."""
+    source = os.environ if environ is None else environ
+    mount = (source.get(VOLUME_ENV) or "").strip()
+    if not mount:
+        return url
+    for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
+        if url.startswith(prefix):
+            path = url[len(prefix):]
+            if path.startswith("/") or (len(path) > 1 and path[1] == ":"):
+                return url  # абсолютный путь задан явно - не трогаем
+            name = Path(path).name or "tournament.db"
+            return prefix + mount.rstrip("/") + "/" + name
+    return url
+
+
 def validate_database_url(url: str) -> Optional[str]:
     """Return an error string (without secrets) or None."""
     try:
@@ -109,7 +130,7 @@ def validate_database_url(url: str) -> Optional[str]:
 
 def load_database_url(env_file: Optional[Path] = None, environ: Optional[Mapping[str, str]] = None) -> str:
     v = _read(env_file, environ)
-    url = v.get("DATABASE_URL", "")
+    url = place_on_volume(v.get("DATABASE_URL", ""), environ)
     if not url:
         raise ConfigError("Missing required setting: DATABASE_URL")
     err = validate_database_url(url)
@@ -167,7 +188,7 @@ def load_config(env_file: Optional[Path] = None, environ: Optional[Mapping[str, 
         allowed_user_ids=allowed,
         bot_token=v["BOT_TOKEN"],
         admin_id=admin_id,
-        database_url=v["DATABASE_URL"],
+        database_url=place_on_volume(v["DATABASE_URL"], environ),
         channel_id=v["CHANNEL_ID"],
         channel_url=v["CHANNEL_URL"],
         chat_id=v["CHAT_ID"],

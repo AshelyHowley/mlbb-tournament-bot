@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import logging
 import sys
 
@@ -18,6 +19,11 @@ async def run() -> int:
     setup_logging(cfg.secrets(), PROJECT_ROOT / "logs")
     log = logging.getLogger("main")
     log.info("ACCESS_MODE=%s (%d extra allowed user(s) besides the admin)", cfg.access_mode, len(cfg.allowed_user_ids))
+    if os.environ.get("RAILWAY_PROJECT_ID") and not os.environ.get("RAILWAY_VOLUME_MOUNT_PATH"):
+        log.warning(
+            "Railway without a Volume: the database lives inside the container and is WIPED on every deploy. "
+            "Add a Volume (Settings -> Volumes, mount path /data) to keep registrations."
+        )
 
     from app.bot.factory import build_bot, build_dispatcher, build_services
     from app.database.migrate import migrate
