@@ -808,23 +808,36 @@ async def bracket_export(cb: CallbackQuery, svc: Services) -> None:
     await show(cb, "✅ Файл отправлен.", akb.to_admin())
 
 
-@router.callback_query(F.data == "log:reg")
+@router.callback_query(F.data.regexp(r"^log:reg(:\d{1,6})?$"))
 async def log_registrations(cb: CallbackQuery, svc: Services) -> None:
-    await cb.answer()
+    await _ack(cb)
+    from app.services import reg_history
+    page_no = int(cb.data.split(":")[2]) if cb.data.count(":") == 2 else 0
     async with svc.team.pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT user_id, action, team_name, details, created_at FROM registration_log "
-            "ORDER BY id DESC LIMIT 30"
-        )
-    if not rows:
-        await show(cb, "📋 <b>История регистраций</b>\n\nПока пусто.", akb.to_admin())
-        return
-    lines = ["📋 <b>История регистраций</b> (последние 30)\n"]
-    for r in rows:
-        lines.append(f"{r['created_at'][:16]} | {r['action']} | {r['team_name'] or '—'} | id:{r['user_id']}")
-        if r['details']:
-            lines.append(f"  {r['details']}")
-    await show(cb, "\n".join(lines), akb.to_admin())
+        total, page_no, last, rows = await reg_history.page(conn, page_no)
+    text = reg_history.render_page(rows, total, page_no, last, svc.cfg.timezone)
+    kb_rows = []
+    if total:
+        kb_rows.append(akb.pager("log:reg", page_no, last))
+        kb_rows.append([B(text="📄 Выгрузить всю историю (Excel)", callback_data="log:reg:csv")])
+    kb_rows.append([B(text="◀️ Админ-панель", callback_data="adm")])
+    await show(cb, text, InlineKeyboardMarkup(inline_keyboard=kb_rows))
+
+
+@router.callback_query(F.data == "log:reg:csv")
+async def log_registrations_csv(cb: CallbackQuery, svc: Services) -> None:
+    await _ack(cb, "Готовлю файл...")
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from aiogram.types import BufferedInputFile
+    from app.services import reg_history
+    async with svc.team.pool.acquire() as conn:
+        data = await reg_history.export_csv(conn, svc.cfg.timezone)
+    stamp = datetime.now(ZoneInfo(svc.cfg.timezone)).strftime("%Y-%m-%d_%H-%M")
+    await cb.bot.send_document(
+        cb.from_user.id, BufferedInputFile(data, filename=f"registrations_{stamp}.csv"),
+        caption="📋 История регистраций целиком. Откройте в Excel или Google Таблицах.",
+    )
 
 
 @router.callback_query(F.data == "log:act")

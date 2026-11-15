@@ -12,6 +12,7 @@ from app.handlers.common import format_solo, format_team, menu_view, show
 from app.keyboards.common import back_to_menu, my_reg_menu
 from app.handlers.team import card_markup
 from app.services.bracket import render_bracket
+from app.utils.audit import log_registration
 from app.services.bracket_png import active_bracket_png
 
 router = Router(name="start")
@@ -124,13 +125,16 @@ async def cb_unregister(cb: CallbackQuery, svc: Services) -> None:
                     row["id"],
                 )
                 await conn.execute("DELETE FROM matches WHERE team_a_id = $1 OR team_b_id = $1 OR winner_id = $1", row["id"])
+                await log_registration(conn, uid, 'unregister_team', row["name"], team_id=row["id"],
+                                       member_role="captain")
                 await conn.execute("DELETE FROM teams WHERE id = $1", row["id"])
             # Solo case: remove solo registration
-            await conn.execute(
+            if await conn.execute(
                 "DELETE FROM solo_players WHERE user_id = $1 AND tournament_id = "
                 "(SELECT id FROM tournaments WHERE status = 'active')",
                 uid,
-            )
+            ) == "DELETE 1":
+                await log_registration(conn, uid, 'unregister_solo')
     if team_name and member_ids:
         note = f"ℹ️ Капитан снял команду «{team_name}» с регистрации. Вы больше не состоите в команде."
         for mid in member_ids:

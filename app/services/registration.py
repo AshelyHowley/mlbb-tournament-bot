@@ -104,7 +104,7 @@ class RegistrationService:
                         if await teams_repo.membership(conn, user.id):
                             raise AlreadyRegistered("ℹ️ Вы уже состоите в команде — соло-регистрация невозможна.")
                         await solo_repo.insert(conn, user.id, norm, norm, role, stars)
-                        await log_registration(conn, user.id, 'solo', None, role)
+                        await log_registration(conn, user.id, 'solo', roles=role, stars=stars)
                         await log_action(conn, user.id, user.username, 'solo_register', role)
                         return MyRegistration(kind="solo", role=role, username=norm, full_name=user.full_name, solo=True, stars=stars)
             except sqlite3.IntegrityError:

@@ -244,7 +244,10 @@ class TeamService:
                         )
                         if role != "registrar":
                             await teams_repo.add_member(conn, team_id, user.id, is_captain=is_captain, rank=rank)
-                        await log_registration(conn, user.id, 'create_team', name, f'role={role}')
+                        await log_registration(
+                            conn, user.id, 'create_team', name, team_id=team_id, member_role=role,
+                            stars=rank if role != "registrar" else None, position=position,
+                        )
                         await log_action(conn, user.id, user.username, 'create_team', name)
                         return await _view(conn, await teams_repo.get(conn, team_id))
             except sqlite3.IntegrityError as e:
@@ -284,6 +287,8 @@ class TeamService:
                     if await teams_repo.member_count(conn, team["id"]) >= MAX_TEAM_SIZE:
                         raise TeamFull()
                     await teams_repo.add_member(conn, team["id"], user.id, rank=rank)
+                    await log_registration(conn, user.id, 'join_team', team["name"], team_id=team["id"],
+                                           member_role="member", stars=rank)
                 return JoinResult(await _view(conn, team), already_member=False)
         except sqlite3.IntegrityError as e:
             _map_pg(e)
@@ -324,6 +329,10 @@ class TeamService:
                         await teams_repo.add_member(conn, team["id"], user.id)
                         await teams_repo.assign_captain(conn, team["id"], user.id)
                         await teams_repo.flag_member_captain(conn, team["id"], user.id, True)
+                    await log_registration(
+                        conn, user.id, 'captain', team["name"], team_id=team["id"], member_role="captain",
+                        details="был в составе" if was_member else "по ссылке капитана",
+                    )
                 fresh = await teams_repo.get(conn, team["id"])  # re-read: captain_id changed inside the tx
                 return CaptainResult(await _view(conn, fresh), already_captain=False, was_member=was_member)
         except sqlite3.IntegrityError as e:
@@ -359,6 +368,8 @@ class TeamService:
                         raise NotFound("Регистрация")
                     if team["captain_id"] is not None:
                         raise Conflict("⛔ Капитан уже назначен — управление командой перешло к нему. Для отмены обратитесь к администратору.")
+                    await log_registration(conn, registrar_id, 'cancel_team', team["name"], team_id=team["id"],
+                                           member_role="registrar")
                     await teams_repo.delete(conn, team["id"])
                     return team["name"]
             except sqlite3.IntegrityError:
@@ -378,6 +389,8 @@ class TeamService:
                 target = next((m for m in before.members if m.user_id == target_id), None)
                 if target is None or not await teams_repo.remove_member(conn, team["id"], target_id):
                     raise NotFound("Игрок")
+                await log_registration(conn, target_id, 'removed', team["name"], f"удалил капитан id {captain_id}",
+                                       team_id=team["id"])
             return target, await _view(conn, team)
 
     async def transfer_captaincy(self, captain_id: int, new_captain_id: int) -> tuple[Member, Member, TeamView]:
@@ -397,6 +410,8 @@ class TeamService:
                     raise NotFound("Игрок")  # not a member of THIS team (forged id / already removed)
                 if not await teams_repo.swap_captain(conn, team["id"], captain_id, new_captain_id):
                     raise Conflict("⚠️ Не удалось передать капитанство, повторите.")
+                await log_registration(conn, new_captain_id, 'captain_transfer', team["name"],
+                                       f"передал капитан id {captain_id}", team_id=team["id"], member_role="captain")
                 team = await teams_repo.get(conn, team["id"])
             return new, old, await _view(conn, team)
 
@@ -420,6 +435,7 @@ class TeamService:
                 me = next((m for m in before.members if m.user_id == user_id), None)
                 if me is None or not await teams_repo.remove_member(conn, team["id"], user_id):
                     raise NotFound("Команда")
+                await log_registration(conn, user_id, 'leave', team["name"], team_id=team["id"])
                 # Fully release the user: clear creator flag and any solo registration
                 await conn.execute(
                     "UPDATE teams SET created_by = NULL WHERE created_by = $1 AND tournament_id = (SELECT id FROM tournaments WHERE status = 'active')",

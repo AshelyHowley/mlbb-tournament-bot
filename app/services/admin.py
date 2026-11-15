@@ -8,6 +8,7 @@ import sqlite3
 from app.repositories import matches as matches_repo
 from app.repositories import solo as solo_repo
 from app.repositories import teams as teams_repo
+from app.utils.audit import log_registration
 from app.services.errors import Conflict, NotFound, TeamNotEligible, ValidationError
 
 PAGE_SIZE = 8
@@ -44,6 +45,10 @@ class AdminService:
                     team_id,
                 )
                 await conn.execute("DELETE FROM matches WHERE team_a_id = $1 OR team_b_id = $1 OR winner_id = $1", team_id)
+                t = await conn.fetchrow("SELECT name, captain_id, created_by FROM teams WHERE id = $1", team_id)
+                if t:
+                    await log_registration(conn, t["captain_id"] or t["created_by"] or 0, 'admin_delete_team', t["name"],
+                                           "снята администратором", team_id=team_id)
                 if await conn.execute("DELETE FROM teams WHERE id = $1", team_id) != "DELETE 1":  # members cascade
                     raise NotFound("Команда")
 
@@ -70,8 +75,10 @@ class AdminService:
 
     async def delete_solo(self, user_id: int) -> None:
         async with self.pool.acquire() as conn:
-            if not await solo_repo.delete(conn, user_id):
-                raise NotFound("Игрок")
+            async with conn.transaction():
+                if not await solo_repo.delete(conn, user_id):
+                    raise NotFound("Игрок")
+                await log_registration(conn, user_id, 'admin_delete_solo', details="снят администратором")
 
     # ---- matches ---------------------------------------------------------
     async def stages(self):
