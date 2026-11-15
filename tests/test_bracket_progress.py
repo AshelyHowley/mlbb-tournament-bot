@@ -235,3 +235,46 @@ async def test_new_tournament_starts_ticked(pool):
     await TournamentService(pool).finalize(TgUser(999, "theadmin", "A"), force=True)
     async with pool.acquire() as c:
         assert await c.fetchval("SELECT third_place_enabled FROM tournaments WHERE status = 'active'") == 1
+
+
+# ------------------------------------------------------------------ public «🏆 Турнирная сетка»
+def _documents(h):
+    from aiogram.methods import SendDocument
+    return [m for m in h.tg.requests if isinstance(m, SendDocument)]
+
+
+async def test_public_bracket_sends_image_to_any_participant(h, pool):
+    await _bracket(pool, 4)
+    h.clear()
+    await h.press(5, "newuser1", "bracket")
+    docs = _documents(h)
+    assert len(docs) == 1 and docs[0].chat_id == 5
+    assert docs[0].caption == "🏆 Турнирная сетка"
+    assert "menu" in [b.callback_data for row in docs[0].reply_markup.inline_keyboard for b in row]
+    assert any("Полуфинал" in t for t in h.texts())  # the text bracket is still there too
+
+
+async def test_public_bracket_replaces_previous_image(h, pool):
+    from aiogram.methods import DeleteMessage
+    await _bracket(pool, 4)
+    await h.press(5, "newuser1", "bracket")
+    h.clear()
+    await h.press(5, "newuser1", "bracket")
+    assert len(_documents(h)) == 1
+    assert any(isinstance(m, DeleteMessage) for m in h.tg.requests)  # the old picture is removed
+
+
+async def test_public_bracket_no_image_when_empty(h, pool):
+    await h.press(5, "newuser1", "bracket")
+    assert _documents(h) == []
+    assert "пока не созданы" in h.last()
+
+
+async def test_bracket_image_cache_follows_changes(pool):
+    from app.services.bracket_png import active_bracket_png
+    await _bracket(pool, 4)
+    first = await active_bracket_png(pool)
+    assert await active_bracket_png(pool) is first  # unchanged bracket -> cached picture
+    s1, _ = await _rows(pool, "semi")
+    await set_winner(pool, s1["id"], s1["team_a_id"])
+    assert await active_bracket_png(pool) != first

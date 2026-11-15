@@ -3,7 +3,8 @@ from __future__ import annotations
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from app.bot.context import Services
 from app.keyboards import common as kbs
@@ -11,6 +12,7 @@ from app.handlers.common import format_solo, format_team, menu_view, show
 from app.keyboards.common import back_to_menu, my_reg_menu
 from app.handlers.team import card_markup
 from app.services.bracket import render_bracket
+from app.services.bracket_png import active_bracket_png
 
 router = Router(name="start")
 
@@ -57,13 +59,36 @@ async def cb_me(cb: CallbackQuery, svc: Services) -> None:
     markup = my_reg_menu(can_unreg)
     await show(cb, "\n\n".join(parts) or "Вы пока не зарегистрированы.", markup)
 
+_last_public_bracket: dict[int, int] = {}  # user id -> message id последней присланной картинки
+
+
 @router.callback_query(F.data == "bracket")
 async def cb_bracket(cb: CallbackQuery, svc: Services) -> None:
-    await cb.answer()
+    try:
+        await cb.answer()
+    except TelegramBadRequest:
+        pass  # устаревшее нажатие - сетку всё равно показываем
     pages = render_bracket(await svc.admin.bracket_rows())
-    await show(cb, pages[0], back_to_menu() if len(pages) == 1 else None)
+    png = await active_bracket_png(svc.team.pool)
+    # кнопка «назад» - под последним сообщением (под картинкой, если она есть)
+    await show(cb, pages[0], back_to_menu() if len(pages) == 1 and png is None else None)
     for i, extra in enumerate(pages[1:], 1):
-        await cb.bot.send_message(cb.from_user.id, extra, reply_markup=back_to_menu() if i == len(pages) - 1 else None)
+        last = i == len(pages) - 1 and png is None
+        await cb.bot.send_message(cb.from_user.id, extra, reply_markup=back_to_menu() if last else None)
+    if png is None:
+        return
+    uid = cb.from_user.id
+    old = _last_public_bracket.pop(uid, None)
+    if old:  # не копим в чате старые картинки - присылаем свежую вместо прежней
+        try:
+            await cb.bot.delete_message(uid, old)
+        except TelegramBadRequest:
+            pass
+    msg = await cb.bot.send_document(
+        uid, BufferedInputFile(png, filename="bracket.png"),
+        caption="🏆 Турнирная сетка", reply_markup=back_to_menu(),
+    )
+    _last_public_bracket[uid] = msg.message_id
 
 
 @router.callback_query(F.data == "noop")

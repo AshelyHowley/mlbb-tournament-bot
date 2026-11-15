@@ -16,6 +16,7 @@ from app.bot.context import Services
 from app.services.bracket import render_bracket
 from app.services.bracket_builder import plan_bracket, save_plan
 from app.services.bracket_image import render_bracket_image
+from app.services.bracket_png import active_bracket_png
 from app.services.bracket_progress import record_winner, set_third_place, third_place_enabled
 from app.handlers.common import IsStaff, show, tg_user
 from app.keyboards import admin as akb
@@ -444,23 +445,10 @@ async def _ack(cb: CallbackQuery, text: str | None = None) -> None:
         pass
 
 
-_BRACKET_ROWS_SQL = (
-    "SELECT m.id, m.stage_code AS stage, m.next_match_id, "
-    "       ta.name AS team_a, tb.name AS team_b, tw.name AS winner "
-    "  FROM matches m JOIN stages s ON s.code = m.stage_code "
-    "  LEFT JOIN teams ta ON ta.id = m.team_a_id "
-    "  LEFT JOIN teams tb ON tb.id = m.team_b_id "
-    "  LEFT JOIN teams tw ON tw.id = m.winner_id "
-    " WHERE m.tournament_id = $1 ORDER BY s.sort_order, m.id"
-)
-
-
 async def _bracket_png(svc) -> bytes:
-    async with svc.team.pool.acquire() as conn:
-        tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active' LIMIT 1")
-        rows = await conn.fetch(_BRACKET_ROWS_SQL, tid)
-    # Pillow синхронный: в отдельном потоке, чтобы бот не «замирал» на время рисования
-    return await asyncio.to_thread(render_bracket_image, [dict(r) for r in rows], "Турнир")
+    png = await active_bracket_png(svc.team.pool)
+    # пустая сетка: всё равно отдаём картинку-заготовку, как раньше
+    return png if png is not None else await asyncio.to_thread(render_bracket_image, [], "Турнир")
 
 
 @router.callback_query(F.data == "br:random")
