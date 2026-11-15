@@ -29,6 +29,7 @@ class Placements:
     third_id: Optional[int]
     third_name: Optional[str]
     # 3-е место разыгрывается только если в сетке были полуфиналы (при 2 командах его нет)
+    # и у турнира стоит галочка «Матч за 3-е место»
     third_required: bool = True
 
     @property
@@ -76,6 +77,9 @@ class TournamentService:
             a_won = s["winner_id"] == s["team_a_id"]
             third_id, third_name = (s["team_b_id"], s["team_b"]) if a_won else (s["team_a_id"], s["team_a"])
         third_required = third is not None or bool(semis)
+        if not await conn.fetchval("SELECT third_place_enabled FROM tournaments WHERE id = $1", tournament_id):
+            third_id = third_name = None  # галочка снята: 3-е место не разыгрывается
+            third_required = False
         return Placements(first_id, first_name, second_id, second_name, third_id, third_name, third_required)
 
     async def placements(self) -> Placements:

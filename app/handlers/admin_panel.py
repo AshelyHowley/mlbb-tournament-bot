@@ -16,7 +16,7 @@ from app.bot.context import Services
 from app.services.bracket import render_bracket
 from app.services.bracket_builder import plan_bracket, save_plan
 from app.services.bracket_image import render_bracket_image
-from app.services.bracket_progress import record_winner
+from app.services.bracket_progress import record_winner, set_third_place, third_place_enabled
 from app.handlers.common import IsStaff, show, tg_user
 from app.keyboards import admin as akb
 from app.services.errors import ServiceError
@@ -256,7 +256,7 @@ def _placements_text(p) -> str:
     return (
         f"👑 1 место: {esc(p.first_name) if p.first_name else 'не определено'}\n"
         f"🥈 2 место: {esc(p.second_name) if p.second_name else 'не определено'}\n"
-        f"🥉 3 место: {esc(p.third_name) if p.third_name else 'не определено'}"
+        f"🥉 3 место: {esc(p.third_name) if p.third_name else ('не определено' if p.third_required else 'не разыгрывается')}"
     )
 
 
@@ -514,6 +514,10 @@ async def bracket_pick(cb: CallbackQuery, state: FSMContext, svc: Services) -> N
     # Second team selected — ask stage
     await state.update_data(br_second=tid)
     stages = [("r16", "1/16"), ("r8", "1/8"), ("r4", "1/4"), ("semi", "Полуфинал"), ("third", "3 место"), ("final", "Финал")]
+    async with svc.team.pool.acquire() as conn:
+        tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        if tid and not await third_place_enabled(conn, tid):
+            stages = [st for st in stages if st[0] != "third"]  # галочка снята - этапа «3 место» нет
     rows = [[B(text=title, callback_data=f"br:stage:{code}")] for code, title in stages]
     rows.append([B(text="❌ Отмена", callback_data="br:new")])
     from aiogram.types import InlineKeyboardMarkup
@@ -532,6 +536,11 @@ async def bracket_stage(cb: CallbackQuery, state: FSMContext, svc: Services) -> 
         return
     try:
         async with svc.team.pool.acquire() as conn:
+            if stage == "third":
+                tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+                if tid and not await third_place_enabled(conn, tid):
+                    await show(cb, "⚠️ Матч за 3-е место выключен в редакторе сетки.", akb.to_admin())
+                    return
             await conn.execute(
                 "INSERT INTO matches (stage_code, team_a_id, team_b_id, tournament_id) "
                 "VALUES ($1, $2, $3, (SELECT id FROM tournaments WHERE status = 'active'))",
@@ -550,8 +559,12 @@ async def bracket_stage(cb: CallbackQuery, state: FSMContext, svc: Services) -> 
 
 @router.callback_query(F.data == "br:edit")
 async def bracket_edit(cb: CallbackQuery, svc: Services) -> None:
-    await cb.answer()
+    # _ack, а не cb.answer(): сюда же попадают после br:win / br:del / br:third, где нажатие уже
+    # подтверждено - повторный answer Telegram отклоняет, и меню бы не показалось
+    await _ack(cb)
     async with svc.team.pool.acquire() as conn:
+        tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+        third_on = await third_place_enabled(conn, tid) if tid else True
         # сыгранные пары (победитель выбран) из списка убираются - остаются только те, что ещё ждут результата
         rows = await conn.fetch(
             "SELECT m.id, s.title, ta.name AS a, ta.id AS aid, tb.name AS b, tb.id AS bid "
@@ -565,15 +578,19 @@ async def bracket_edit(cb: CallbackQuery, svc: Services) -> None:
             "SELECT count(*) FROM matches WHERE status = 'finished' "
             "AND tournament_id = (SELECT id FROM tournaments WHERE status = 'active')"
         )
-    if not rows and not played:
-        await show(cb, "ℹ️ Сетка пуста.", akb.to_admin())
-        return
     lines = ["✏️ <b>Редактирование сетки</b>\n"]
     if played:
         lines.append(f"✅ Сыграно пар: {played}\n")
-    if not rows:
+    if not rows and not played:
+        lines.append("ℹ️ Сетка пуста.")
+    elif not rows:
         lines.append("Все готовые пары сыграны. Новые пары появятся, когда определятся их участники.")
-    kb_rows = []
+    if not third_on:
+        lines.append("\n🥉 Матч за 3-е место не разыгрывается.")
+    kb_rows = [[B(
+        text=("☑️" if third_on else "⬜") + " Матч за 3-е место",
+        callback_data="br:third:" + ("off" if third_on else "on"),
+    )]]
     for r in rows:
         lines.append(f"{esc(r['title'])}: {esc(r['a'])} vs {esc(r['b'])}")
         kb_rows.append([
@@ -585,6 +602,25 @@ async def bracket_edit(cb: CallbackQuery, svc: Services) -> None:
     kb_rows.append([B(text="🗑 Удалить все", callback_data="br:clear")])
     kb_rows.append([B(text="◀️ Назад", callback_data="adm:bracket")])
     await show(cb, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows))
+
+
+@router.callback_query(F.data.in_({"br:third:on", "br:third:off"}))
+async def bracket_third_toggle(cb: CallbackQuery, svc: Services) -> None:
+    await _ack(cb)
+    enable = cb.data.endswith(":on")
+    try:
+        async with svc.team.pool.acquire() as conn:
+            async with conn.transaction():
+                tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active'")
+                if not tid:
+                    await show(cb, "⚠️ Нет активного турнира.", akb.to_admin())
+                    return
+                await set_third_place(conn, tid, enable)
+    except ServiceError as e:
+        await show(cb, e.user_message, akb.to_admin())
+        return
+    log.info("third place match %s by %s", "enabled" if enable else "disabled", cb.from_user.id)
+    await bracket_edit(cb, svc)
 
 
 @router.callback_query(F.data.regexp(r"^br:win:\d+:\d+$"))

@@ -171,3 +171,67 @@ async def test_played_pair_disappears_from_editor(h, pool):
     assert not any(d.startswith(f"br:win:{s1['id']}:") or d == f"br:del:{s1['id']}" for d in datas)
     assert any(d.startswith(f"br:win:{s2['id']}:") for d in datas)  # the unplayed semi is still there
     assert "Сыграно пар: 1" in h.last()
+
+
+# ------------------------------------------------------------------ 3rd-place checkbox
+async def _play_semis(pool):
+    s1, s2 = await _rows(pool, "semi")
+    await set_winner(pool, s1["id"], s1["team_a_id"])
+    await set_winner(pool, s2["id"], s2["team_a_id"])
+    return s1, s2
+
+
+async def test_checkbox_on_by_default_and_shown(h, pool):
+    await _bracket(pool, 4)
+    await h.press(ADMIN_ID, "adm", "br:edit")
+    assert "br:third:off" in _last_datas(h)  # ticked -> the button offers to switch it off
+    assert "☑️ Матч за 3-е место" in h.buttons()
+
+
+async def test_unticked_no_third_place_match_and_podium_complete_without_it(h, pool):
+    from app.services.tournament import TournamentService
+    await _bracket(pool, 4)
+    await h.press(ADMIN_ID, "adm", "br:third:off")
+    assert "br:third:on" in _last_datas(h)
+    assert "не разыгрывается" in h.last()
+    await _play_semis(pool)
+    assert await _rows(pool, "third") == []  # not created
+    (final,) = await _rows(pool, "final")
+    await set_winner(pool, final["id"], final["team_a_id"])
+    p = await TournamentService(pool).placements()
+    assert p.ready and p.third_id is None  # finishing does not need an early close
+
+
+async def test_untick_after_creation_deletes_it_and_retick_recreates(h, pool):
+    await _bracket(pool, 4)
+    s1, s2 = await _play_semis(pool)
+    (third,) = await _rows(pool, "third")
+    await set_winner(pool, third["id"], third["team_a_id"])
+    await h.press(ADMIN_ID, "adm", "br:third:off")
+    assert await _rows(pool, "third") == []
+    await h.press(ADMIN_ID, "adm", "br:third:on")
+    (again,) = await _rows(pool, "third")
+    assert {again["team_a_id"], again["team_b_id"]} == {s1["team_b_id"], s2["team_b_id"]}
+    assert again["status"] != "finished"
+
+
+async def test_unticked_hides_third_stage_in_manual_pairing(h, pool):
+    a, b = await make_team(pool, 1, "Alpha"), await make_team(pool, 2, "Bravo")
+    await h.press(ADMIN_ID, "adm", "br:third:off")
+    await h.press(ADMIN_ID, "adm", f"br:pick:{a}")
+    await h.press(ADMIN_ID, "adm", f"br:pick:{b}")
+    assert "br:stage:third" not in _last_datas(h)
+    await h.press(ADMIN_ID, "adm", "br:stage:third")  # stale/forged button
+    assert await _rows(pool, "third") == []
+
+
+async def test_new_tournament_starts_ticked(pool):
+    from app.services.registration import TgUser
+    from app.services.tournament import TournamentService
+    from tests.helpers import add_user
+    async with pool.acquire() as c:
+        await c.execute("UPDATE tournaments SET third_place_enabled = 0 WHERE status = 'active'")
+    await add_user(pool, 999, "theadmin")
+    await TournamentService(pool).finalize(TgUser(999, "theadmin", "A"), force=True)
+    async with pool.acquire() as c:
+        assert await c.fetchval("SELECT third_place_enabled FROM tournaments WHERE status = 'active'") == 1

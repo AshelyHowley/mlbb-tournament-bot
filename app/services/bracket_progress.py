@@ -7,7 +7,8 @@
   * победитель проходит в слот следующего матча (next_match_id);
   * результат можно исправить, пока следующий матч не сыгран: прежний победитель
     в следующем матче заменяется новым, а не остаётся там «навсегда»;
-  * когда оба полуфинала сыграны, проигравшие автоматически ставятся в матч за 3-е место.
+  * когда оба полуфинала сыграны, проигравшие автоматически ставятся в матч за 3-е место -
+    если у турнира стоит галочка «Матч за 3-е место» (tournaments.third_place_enabled).
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ async def record_winner(conn, match_id: int, winner_id: int) -> bool:
         "UPDATE matches SET winner_id = $2, status = 'finished', finished_at = datetime('now') WHERE id = $1",
         match_id, winner_id,
     )
-    if m["stage_code"] == "semi":
+    if m["stage_code"] == "semi" and await third_place_enabled(conn, m["tournament_id"]):
         await _sync_third_place(conn, m["tournament_id"])
     return True
 
@@ -94,3 +95,21 @@ async def _sync_third_place(conn, tournament_id: int) -> None:
     await conn.execute(
         "UPDATE matches SET team_a_id = $2, team_b_id = $3 WHERE id = $1", third["id"], a, b
     )
+
+
+async def third_place_enabled(conn, tournament_id: int) -> bool:
+    return bool(await conn.fetchval("SELECT third_place_enabled FROM tournaments WHERE id = $1", tournament_id))
+
+
+async def set_third_place(conn, tournament_id: int, enabled: bool) -> None:
+    """Галочка «Матч за 3-е место». Выключение удаляет матч за 3-е место (если он уже есть),
+    включение сразу создаёт его, если оба полуфинала уже сыграны."""
+    await conn.execute(
+        "UPDATE tournaments SET third_place_enabled = $2 WHERE id = $1", tournament_id, 1 if enabled else 0
+    )
+    if enabled:
+        await _sync_third_place(conn, tournament_id)
+    else:
+        await conn.execute(
+            "DELETE FROM matches WHERE tournament_id = $1 AND stage_code = 'third'", tournament_id
+        )
