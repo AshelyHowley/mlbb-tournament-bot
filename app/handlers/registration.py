@@ -26,6 +26,7 @@ class RegTeam(StatesGroup):
     name = State()
     role = State()
     stars = State()
+    position = State()
     confirm = State()
 
 
@@ -95,8 +96,39 @@ async def team_begin(cb: CallbackQuery, state: FSMContext, svc: Services) -> Non
     if reg is not None and reg.has_team and not svc.cfg.is_bot_admin(cb.from_user.id):
         await show(cb, "ℹ️ Вы уже зарегистрировали команду. Откройте «Моя команда».", tkb.my_team_only())
         return
+    await _load_archive(state, svc, cb.from_user.id)
     await state.set_state(RegTeam.name)
     await show(cb, NAME_PROMPT, kbs.nav(back=False))
+
+
+# ---------------------------------------------------------------- player archive helpers
+TEAM_MAX_STARS = 50000
+SOLO_MAX_STARS = 10000
+TEAM_STARS_PROMPT = "⭐ Укажите ваш максимальный ранг (число):"
+SOLO_STARS_PROMPT = "⭐ Сколько звёзд в Максе?\nНапишите число (например 1000):"
+POSITION_PROMPT = "📝 Кем вы являетесь? (должность)\nНапример: Менеджер, Организатор, Тренер..."
+
+
+async def _load_archive(state: FSMContext, svc: Services, user_id: int) -> None:
+    """Put the player's archived data (if any) into the FSM so prompts can offer to reuse it."""
+    a = await svc.archive.get(user_id)
+    if a is None:
+        return
+    await state.update_data(arch_stars=a.stars, arch_roles=[r for r in a.roles if r in ROLES], arch_pos=a.position)
+
+
+def _stars_markup(data: dict, limit: int):
+    s = data.get("arch_stars")
+    if s is not None and 0 <= s <= limit:
+        return kbs.keep_value(f"✅ Оставить прежнее: {s} ⭐", "reg:keep:stars")
+    return kbs.nav()
+
+
+def _position_markup(data: dict):
+    p = data.get("arch_pos")
+    if p:
+        return kbs.keep_value(f"✅ Оставить: {p}", "reg:keep:pos")
+    return kbs.nav()
 
 
 @router.message(RegTeam.name, F.text)
@@ -119,21 +151,15 @@ async def team_role(cb: CallbackQuery, state: FSMContext) -> None:
     role = cb.data.rsplit(":", 1)[1]
     if role not in CREATOR_ROLES:
         return
-    data = await state.get_data()
     await state.update_data(role=role)
-    await state.set_state(RegTeam.stars)
-    await show(cb, "⭐ Сколько звёзд суммарно у команды (все 5 игроков)?\nНапишите число:", kbs.nav())
-    return
-    seats = 0 if role == "registrar" else 1
-    await show(
-        cb,
-        f"📋 <b>Проверьте данные</b>\n\nКоманда: <b>{esc(data['name'])}</b>\n"
-        f"Вы: {person(cb.from_user.full_name, cb.from_user.username, cb.from_user.id)}\n"
-        f"Ваша роль: {ROLE_TITLES[role]}\nСостав после создания: {seats}/{MAX_TEAM_SIZE}\n\n"
-        + ("Игроков вы пригласите по личной ссылке." if role == "captain"
-           else "Вы получите отдельную ссылку для капитана; набор игроков откроется после его назначения."),
-        kbs.confirm_reg(),
-    )
+    data = await state.get_data()
+    if role == "registrar":
+        await state.set_state(RegTeam.position)
+        await show(cb, POSITION_PROMPT, _position_markup(data))
+    else:
+        # Captain or member: ask for their rank (one tap to reuse the archived one)
+        await state.set_state(RegTeam.stars)
+        await show(cb, TEAM_STARS_PROMPT, _stars_markup(data, TEAM_MAX_STARS))
 
 
 @router.message(RegTeam.name, ~F.text)
@@ -149,20 +175,52 @@ async def reg_wrong_input(message: Message) -> None:
 @router.message(RegTeam.stars)
 async def team_stars(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
-    if not text.isdigit() or not (0 <= int(text) <= 50000):
-        await message.answer("Введите число от 0 до 50000")
+    if not text.isdigit() or not (0 <= int(text) <= TEAM_MAX_STARS):
+        await message.answer(f"Введите число от 0 до {TEAM_MAX_STARS}")
         return
-    await state.update_data(stars=int(text))
+    await _team_stars_done(message, state, int(text))
+
+
+async def _team_stars_done(event, state: FSMContext, stars: int) -> None:
+    await state.update_data(stars=stars)
     data = await state.get_data()
     await state.set_state(RegTeam.confirm)
-    await message.answer(
+    role = data.get("role", "—")
+    await show(
+        event,
         f"📋 <b>Проверьте данные</b>\n\n"
-        f"Команда: <b>{data.get('name', '—')}</b>\n"
-        f"Ваша роль: {data.get('role', '—')}\n"
-        f"⭐ Звёзды команды: <b>{text}</b>",
-        reply_markup=kbs.confirm_reg(),
+        f"Команда: <b>{esc(data.get('name', '—'))}</b>\n"
+        f"Ваша роль: {ROLE_TITLES.get(role, role)}\n"
+        f"⭐ Ваш ранг: <b>{stars}</b>",
+        kbs.confirm_reg(),
     )
 
+
+
+@router.message(RegTeam.position)
+async def team_position(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text or len(text) < 2 or len(text) > 40:
+        await message.answer("Введите должность от 2 до 40 символов")
+        return
+    await _team_position_done(message, state, text)
+
+
+async def _team_position_done(event, state: FSMContext, position: str) -> None:
+    await state.update_data(position=position)
+    data = await state.get_data()
+    await state.set_state(RegTeam.confirm)
+    u = event.from_user
+    await show(
+        event,
+        f"📋 <b>Проверьте данные</b>\n\n"
+        f"Команда: <b>{esc(data.get('name', '—'))}</b>\n"
+        f"Вы: {person(u.full_name, u.username, u.id)}\n"
+        f"Ваша роль: {ROLE_TITLES.get('registrar')}\n"
+        f"Должность: <b>{esc(position)}</b>\n\n"
+        "Вы получите отдельную ссылку для капитана; набор игроков откроется после его назначения.",
+        kbs.confirm_reg(),
+    )
 
 # ---------------------------------------------------------------- solo flow
 @router.callback_query(F.data == "reg:solo")
@@ -170,9 +228,35 @@ async def solo_begin(cb: CallbackQuery, state: FSMContext, svc: Services) -> Non
     await cb.answer()
     if not await _guard(cb, state, svc):
         return
+    await _load_archive(state, svc, cb.from_user.id)
+    data = await state.get_data()
+    arch_roles, arch_stars = data.get("arch_roles"), data.get("arch_stars")
+    if arch_roles and arch_stars is not None and 0 <= arch_stars <= SOLO_MAX_STARS:
+        # Known player: everything is pre-filled from the archive, they only correct roles / stars.
+        await state.update_data(roles=list(arch_roles), stars=arch_stars)
+        await _solo_confirm(cb, state, "♻️ <b>Мы нашли ваши данные с прошлой регистрации.</b>\n"
+                                       "Проверьте их — при необходимости измените роли или звёзды.\n\n")
+        return
     await state.set_state(RegSolo.role)
-    await state.update_data(roles=[])
-    await show(cb, "👤 <b>Соло-регистрация</b>\n\nВыберите роли (можно несколько):", kbs.roles_multi())
+    await state.update_data(roles=list(arch_roles or []))
+    await show(cb, SOLO_ROLES_PROMPT, kbs.roles_multi(arch_roles or []))
+
+
+SOLO_ROLES_PROMPT = "👤 <b>Соло-регистрация</b>\n\nВыберите роли (можно несколько):"
+
+
+async def _solo_confirm(event, state: FSMContext, prefix: str = "") -> None:
+    data = await state.get_data()
+    await state.set_state(RegSolo.confirm)
+    u = event.from_user
+    await show(
+        event,
+        prefix + f"📋 <b>Проверьте данные</b>\n\n"
+        f"Telegram: {person(u.full_name, u.username, u.id)}\n"
+        f"Роли: <b>{', '.join(data.get('roles', []))}</b>\n"
+        f"Звёзды: <b>{data.get('stars', 0)}</b>",
+        kbs.confirm_reg(edit=True),
+    )
 
 
 @router.callback_query(RegSolo.role, F.data.startswith("reg:role:"))
@@ -188,8 +272,11 @@ async def solo_role(cb: CallbackQuery, state: FSMContext) -> None:
             await cb.answer("Выберите хотя бы одну роль", show_alert=True)
             return
         await state.update_data(roles=roles)
+        if data.get("stars") is not None:  # editing roles on the confirm screen: stars already known
+            await _solo_confirm(cb, state)
+            return
         await state.set_state(RegSolo.stars)
-        await show(cb, "⭐ Сколько звёзд в Максе?\nНапишите число (например 1000):", kbs.nav())
+        await show(cb, SOLO_STARS_PROMPT, _stars_markup(data, SOLO_MAX_STARS))
         return
     elif choice in ROLES:
         if choice in roles:
@@ -197,26 +284,57 @@ async def solo_role(cb: CallbackQuery, state: FSMContext) -> None:
         else:
             roles.append(choice)
     await state.update_data(roles=roles)
-    await show(cb, "👤 <b>Соло-регистрация</b>\n\nВыберите роли (можно несколько):", kbs.roles_multi(roles))
+    await show(cb, SOLO_ROLES_PROMPT, kbs.roles_multi(roles))
 
 
 @router.message(RegSolo.stars)
 async def solo_stars(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
-    if not text.isdigit() or not (0 <= int(text) <= 10000):
-        await message.answer("Введите число от 0 до 10000")
+    if not text.isdigit() or not (0 <= int(text) <= SOLO_MAX_STARS):
+        await message.answer(f"Введите число от 0 до {SOLO_MAX_STARS}")
         return
     await state.update_data(stars=int(text))
+    await _solo_confirm(message, state)
+
+
+# ---------------------------------------------------------------- reuse / correct archived values
+@router.callback_query(StateFilter(RegTeam.stars, RegSolo.stars), F.data == "reg:keep:stars")
+async def keep_stars(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
     data = await state.get_data()
-    roles = data.get("roles", [])
-    await state.set_state(RegSolo.confirm)
-    await message.answer(
-        f"📋 <b>Проверьте данные</b>\n\n"
-        f"Telegram: {person(message.from_user.full_name, message.from_user.username, message.from_user.id)}\n"
-        f"Роли: <b>{', '.join(roles)}</b>\n"
-        f"Звёзды: <b>{text}</b>",
-        reply_markup=kbs.confirm_reg(),
-    )
+    stars = data.get("arch_stars")
+    if stars is None:
+        return
+    if await state.get_state() == RegTeam.stars.state:
+        await _team_stars_done(cb, state, stars)
+    else:
+        await state.update_data(stars=stars)
+        await _solo_confirm(cb, state)
+
+
+@router.callback_query(RegTeam.position, F.data == "reg:keep:pos")
+async def keep_position(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    pos = (await state.get_data()).get("arch_pos")
+    if pos:
+        await _team_position_done(cb, state, pos)
+
+
+@router.callback_query(RegSolo.confirm, F.data == "reg:edit:roles")
+async def edit_roles(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    roles = (await state.get_data()).get("roles", [])
+    await state.set_state(RegSolo.role)
+    await show(cb, SOLO_ROLES_PROMPT, kbs.roles_multi(roles))
+
+
+@router.callback_query(RegSolo.confirm, F.data == "reg:edit:stars")
+async def edit_stars(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    data = await state.get_data()
+    await state.set_state(RegSolo.stars)
+    await state.update_data(arch_stars=data.get("stars"))  # "keep" button = the current value
+    await show(cb, SOLO_STARS_PROMPT, _stars_markup({"arch_stars": data.get("stars")}, SOLO_MAX_STARS))
 
 
 # ---------------------------------------------------------------- back / cancel
@@ -237,10 +355,14 @@ async def reg_back(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
     elif cur == RegTeam.role.state:
         await state.set_state(RegTeam.name)
         await show(cb, NAME_PROMPT, kbs.nav(back=False))
-    elif cur == RegSolo.confirm.state:
+    elif cur in (RegTeam.stars.state, RegTeam.position.state):
+        await state.set_state(RegTeam.role)
+        data = await state.get_data()
+        await show(cb, f"🏆 Команда: <b>{esc(data['name'])}</b>\n\n{ROLE_PROMPT}", kbs.team_role())
+    elif cur in (RegSolo.confirm.state, RegSolo.stars.state):
         await state.set_state(RegSolo.role)
-        await state.update_data(roles=[])
-        await show(cb, "👤 <b>Соло-регистрация</b>\n\nВыберите роли (можно несколько):", kbs.roles_multi())
+        roles = (await state.get_data()).get("roles", [])
+        await show(cb, SOLO_ROLES_PROMPT, kbs.roles_multi(roles))
     else:
         await _to_menu(cb, state, svc)
 
@@ -285,8 +407,10 @@ async def _finalize(cb: CallbackQuery, state: FSMContext, svc: Services) -> None
     user = tg_user(cb)
     try:
         if cur == RegTeam.confirm.state:
+            stars = data.get("stars", 0)
+            position = data.get("position")
             view = await svc.team.create_team(user, data["name"], data.get("role", "captain"),
-                                              is_admin=svc.cfg.is_bot_admin(user.id))
+                                              rank=stars, position=position, is_admin=svc.cfg.is_bot_admin(user.id))
         else:
             roles = data.get("roles", [data.get("role", "EXP")])
             role_str = ",".join(roles) if isinstance(roles, list) else roles
@@ -301,6 +425,14 @@ async def _finalize(cb: CallbackQuery, state: FSMContext, svc: Services) -> None
         await show(cb, e.user_message, kbs.back_to_menu())
         return
     await state.clear()
+    if cur == RegTeam.confirm.state:
+        t_role = data.get("role", "captain")
+        await svc.archive.save(
+            user.id, user.username, user.full_name, kind=t_role, team_name=data["name"],
+            stars=None if t_role == "registrar" else data.get("stars", 0), position=data.get("position"),
+        )
+    else:
+        await svc.archive.save(user.id, user.username, user.full_name, kind="solo", roles=role_str, stars=stars)
     if cur == RegTeam.confirm.state:
         await _team_created_screen(cb, svc, view, data.get("role", "captain"))
     else:
