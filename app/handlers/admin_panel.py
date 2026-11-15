@@ -126,6 +126,138 @@ async def db_backup(cb: CallbackQuery, svc: Services) -> None:
     await show(cb, text, akb.to_admin())
 
 
+class RestoreDb(StatesGroup):
+    waiting_file = State()   # ждём файл копии
+    confirm = State()        # файл проверен, ждём подтверждения
+
+
+async def _download(bot, document) -> bytes:
+    """Скачивает присланный файл (вынесено отдельно, чтобы тесты могли подменить Telegram)."""
+    from io import BytesIO
+    buf = BytesIO()
+    await bot.download(document, destination=buf)
+    return buf.getvalue()
+
+
+def _restore_cancel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[B(text="❌ Отмена", callback_data="adm:restore:no")]])
+
+
+@router.callback_query(F.data == "adm:restore")
+async def db_restore_start(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
+    if not svc.cfg.is_bot_admin(cb.from_user.id):
+        await _ack(cb, "Только для главного админа.")
+        return
+    await _ack(cb)
+    await state.set_state(RestoreDb.waiting_file)
+    await show(
+        cb,
+        "♻️ <b>Восстановление базы</b>\n\n"
+        "Перешлите сюда файл копии, который присылал бот:\n"
+        "• <code>tournament_….db</code> - команды, соло, сетка, история\n"
+        "• <code>player_archive_….db</code> - архив игроков\n\n"
+        "Перед заменой я покажу, что в файле, и пришлю вам копию текущей базы.",
+        _restore_cancel_kb(),
+    )
+
+
+@router.message(RestoreDb.waiting_file, F.document)
+async def db_restore_file(message: Message, state: FSMContext, svc: Services) -> None:
+    import os
+    import tempfile
+    from app.services.db_backup import TELEGRAM_DOWNLOAD_LIMIT, BadBackup, inspect_backup
+
+    if not svc.cfg.is_bot_admin(message.from_user.id):
+        await state.clear()
+        return
+    doc = message.document
+    if doc.file_size and doc.file_size > TELEGRAM_DOWNLOAD_LIMIT:
+        await message.answer("⚠️ Файл больше 20 МБ - бот не может скачать его из Telegram.", reply_markup=_restore_cancel_kb())
+        return
+    data = await _download(message.bot, doc)
+    fd, tmp = tempfile.mkstemp(suffix=".db", prefix="restore_")
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    try:
+        info = await asyncio.to_thread(inspect_backup, tmp)
+    except BadBackup as e:
+        os.unlink(tmp)
+        await message.answer(f"⚠️ {e}\n\nПришлите другой файл или нажмите «Отмена».", reply_markup=_restore_cancel_kb())
+        return
+    old = (await state.get_data()).get("restore_tmp")
+    if old and os.path.exists(old):
+        os.unlink(old)
+    await state.update_data(restore_tmp=tmp, restore_kind=info["kind"])
+    await state.set_state(RestoreDb.confirm)
+    if info["kind"] == "tournament":
+        what = (f"База турнира:\n👥 команд: <b>{info['teams']}</b>\n👤 соло-игроков: <b>{info['solo']}</b>\n"
+                f"📚 турниров в истории: <b>{info['history']}</b>")
+    else:
+        what = f"Архив игроков:\n🗂 игроков: <b>{info['players']}</b>"
+    await message.answer(
+        f"♻️ <b>Проверьте файл</b>\n\n{what}\n\n"
+        "⚠️ Текущие данные будут <b>заменены</b> данными из файла. Копию текущей базы я пришлю перед заменой.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [B(text="⚠️ Заменить базу", callback_data="adm:restore:ok")],
+            [B(text="❌ Отмена", callback_data="adm:restore:no")],
+        ]),
+    )
+
+
+@router.message(RestoreDb.waiting_file)
+async def db_restore_not_a_file(message: Message) -> None:
+    await message.answer("Пришлите именно файл .db (как документ) или нажмите «Отмена».", reply_markup=_restore_cancel_kb())
+
+
+@router.callback_query(F.data == "adm:restore:no")
+async def db_restore_cancel(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
+    import os
+    tmp = (await state.get_data()).get("restore_tmp")
+    if tmp and os.path.exists(tmp):
+        os.unlink(tmp)
+    await _ack(cb)
+    await _menu(cb, svc, state)
+
+
+@router.callback_query(RestoreDb.confirm, F.data == "adm:restore:ok")
+async def db_restore_apply(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
+    import os
+    from app.database.migrate import migrate
+    from app.services.db_backup import inspect_backup, restore_into, send_backup, sqlite_path
+
+    if not svc.cfg.is_bot_admin(cb.from_user.id):
+        await _ack(cb, "Только для главного админа.")
+        return
+    await _ack(cb, "Восстанавливаю...")
+    data = await state.get_data()
+    tmp, kind = data.get("restore_tmp"), data.get("restore_kind")
+    await state.clear()
+    if not tmp or not os.path.exists(tmp):
+        await show(cb, "⚠️ Файл потерялся (бот перезапускался?). Начните заново.", akb.to_admin())
+        return
+    target = sqlite_path(svc.cfg.database_url) if kind == "tournament" else svc.archive.path
+    try:
+        # страховка: текущее состояние - админу, до того как его перезапишем
+        await send_backup(cb.bot, cb.from_user.id, svc.cfg, svc.archive.path, label="До восстановления: ")
+        await asyncio.to_thread(restore_into, tmp, target)
+        if kind == "tournament":
+            await migrate(svc.team.pool)  # копия могла быть сделана старой версией бота
+        info = await asyncio.to_thread(inspect_backup, target)
+    except Exception:
+        log.exception("database restore failed")
+        await show(cb, "❌ Не удалось восстановить базу. Текущая копия была отправлена вам выше.", akb.to_admin())
+        return
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    log.warning("database %s restored from a backup by admin %s", kind, cb.from_user.id)
+    if kind == "tournament":
+        done = f"👥 команд: <b>{info['teams']}</b>, 👤 соло: <b>{info['solo']}</b>"
+    else:
+        done = f"🗂 игроков в архиве: <b>{info['players']}</b>"
+    await show(cb, f"✅ <b>База восстановлена</b>\n\n{done}", akb.to_admin())
+
+
 # ------------------------------------------------------------------ teams
 @router.callback_query(F.data.regexp(r"^adm:t:\d{1,6}$"))
 async def teams_list(cb: CallbackQuery, svc: Services) -> None:

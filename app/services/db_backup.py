@@ -155,3 +155,53 @@ class AutoBackup:
             await asyncio.wait_for(self.run_once("Копия перед остановкой: "), timeout=20)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------------------- restore
+TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024  # бот может скачать из Telegram файл не больше 20 МБ
+
+
+class BadBackup(Exception):
+    """Файл не похож на копию базы бота. Текст - для пользователя."""
+
+
+def inspect_backup(path: str) -> dict:
+    """Проверяет присланный файл. Возвращает {'kind': 'tournament'|'player_archive', ...счётчики}."""
+    try:
+        c = sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
+    except sqlite3.DatabaseError:
+        raise BadBackup("Это не файл базы данных.")
+    try:
+        try:
+            if c.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise BadBackup("Файл базы повреждён.")
+            tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        except sqlite3.DatabaseError:
+            raise BadBackup("Это не файл базы данных.")
+        if {"teams", "solo_players", "tournaments"} <= tables:
+            count = lambda sql: c.execute(sql).fetchone()[0]
+            return {
+                "kind": "tournament",
+                "teams": count("SELECT count(*) FROM teams t JOIN tournaments r ON r.id = t.tournament_id "
+                               "WHERE r.status = 'active'"),
+                "solo": count("SELECT count(*) FROM solo_players s JOIN tournaments r ON r.id = s.tournament_id "
+                              "WHERE r.status = 'active'"),
+                "history": count("SELECT count(*) FROM tournaments WHERE status <> 'active'"),
+            }
+        if "players" in tables:
+            return {"kind": "player_archive", "players": c.execute("SELECT count(*) FROM players").fetchone()[0]}
+        raise BadBackup("Это база, но не от этого бота.")
+    finally:
+        c.close()
+
+
+def restore_into(src_path: str, dst_path: str) -> None:
+    """Заменяет содержимое базы dst_path содержимым src_path (backup API: атомарно для читателей,
+    живые соединения бота сразу видят новые данные - перезапуск не нужен)."""
+    src = sqlite3.connect(f"file:{Path(src_path).as_posix()}?mode=ro", uri=True)
+    dst = sqlite3.connect(dst_path, timeout=30)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()

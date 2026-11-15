@@ -19,7 +19,8 @@ def admin_menu(is_main_admin: bool = True) -> InlineKeyboardMarkup:
         [B(text="📚 История турниров", callback_data="hist:0"), B(text="🏁 Завершить турнир", callback_data="tf:start")],
     ]
     if is_main_admin:
-        rows.append([B(text="🛡 Заместители", callback_data="dep:menu"), B(text="💾 Скачать базу", callback_data="adm:backup")])
+        rows.append([B(text="🛡 Заместители", callback_data="dep:menu")])
+        rows.append([B(text="💾 Скачать базу", callback_data="adm:backup"), B(text="♻️ Восстановить базу", callback_data="adm:restore")])
     rows.append([B(text="◀️ В меню", callback_data="menu")])
     return kb(rows)
 
