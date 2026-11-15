@@ -26,6 +26,7 @@ class RegTeam(StatesGroup):
     name = State()
     role = State()
     stars = State()
+    position = State()
     confirm = State()
 
 
@@ -119,21 +120,14 @@ async def team_role(cb: CallbackQuery, state: FSMContext) -> None:
     role = cb.data.rsplit(":", 1)[1]
     if role not in CREATOR_ROLES:
         return
-    data = await state.get_data()
     await state.update_data(role=role)
-    await state.set_state(RegTeam.stars)
-    await show(cb, "⭐ Сколько звёзд суммарно у команды (все 5 игроков)?\nНапишите число:", kbs.nav())
-    return
-    seats = 0 if role == "registrar" else 1
-    await show(
-        cb,
-        f"📋 <b>Проверьте данные</b>\n\nКоманда: <b>{esc(data['name'])}</b>\n"
-        f"Вы: {person(cb.from_user.full_name, cb.from_user.username, cb.from_user.id)}\n"
-        f"Ваша роль: {ROLE_TITLES[role]}\nСостав после создания: {seats}/{MAX_TEAM_SIZE}\n\n"
-        + ("Игроков вы пригласите по личной ссылке." if role == "captain"
-           else "Вы получите отдельную ссылку для капитана; набор игроков откроется после его назначения."),
-        kbs.confirm_reg(),
-    )
+    if role == "registrar":
+        await state.set_state(RegTeam.position)
+        await show(cb, "📝 Кем вы являетесь? (должность)\nНапример: Менеджер, Организатор, Тренер...", kbs.nav())
+    else:
+        # Captain or member: ask for their rank
+        await state.set_state(RegTeam.stars)
+        await show(cb, "⭐ Укажите ваш максимальный ранг (число):", kbs.nav())
 
 
 @router.message(RegTeam.name, ~F.text)
@@ -155,14 +149,35 @@ async def team_stars(message: Message, state: FSMContext) -> None:
     await state.update_data(stars=int(text))
     data = await state.get_data()
     await state.set_state(RegTeam.confirm)
+    role = data.get("role", "—")
     await message.answer(
         f"📋 <b>Проверьте данные</b>\n\n"
         f"Команда: <b>{data.get('name', '—')}</b>\n"
-        f"Ваша роль: {data.get('role', '—')}\n"
-        f"⭐ Звёзды команды: <b>{text}</b>",
+        f"Ваша роль: {ROLE_TITLES.get(role, role)}\n"
+        f"⭐ Ваш ранг: <b>{text}</b>",
         reply_markup=kbs.confirm_reg(),
     )
 
+
+
+@router.message(RegTeam.position)
+async def team_position(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text or len(text) < 2 or len(text) > 40:
+        await message.answer("Введите должность от 2 до 40 символов")
+        return
+    await state.update_data(position=text)
+    data = await state.get_data()
+    await state.set_state(RegTeam.confirm)
+    await message.answer(
+        f"📋 <b>Проверьте данные</b>\n\n"
+        f"Команда: <b>{data.get('name', '—')}</b>\n"
+        f"Вы: {person(message.from_user.full_name, message.from_user.username, message.from_user.id)}\n"
+        f"Ваша роль: {ROLE_TITLES.get('registrar')}\n"
+        f"Должность: <b>{text}</b>\n\n"
+        "Вы получите отдельную ссылку для капитана; набор игроков откроется после его назначения.",
+        reply_markup=kbs.confirm_reg(),
+    )
 
 # ---------------------------------------------------------------- solo flow
 @router.callback_query(F.data == "reg:solo")
@@ -285,8 +300,10 @@ async def _finalize(cb: CallbackQuery, state: FSMContext, svc: Services) -> None
     user = tg_user(cb)
     try:
         if cur == RegTeam.confirm.state:
+            stars = data.get("stars", 0)
+            position = data.get("position")
             view = await svc.team.create_team(user, data["name"], data.get("role", "captain"),
-                                              is_admin=svc.cfg.is_bot_admin(user.id))
+                                              rank=stars, position=position, is_admin=svc.cfg.is_bot_admin(user.id))
         else:
             roles = data.get("roles", [data.get("role", "EXP")])
             role_str = ",".join(roles) if isinstance(roles, list) else roles
@@ -311,3 +328,4 @@ async def _finalize(cb: CallbackQuery, state: FSMContext, svc: Services) -> None
 async def reg_confirm(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
     await cb.answer()
     await _finalize(cb, state, svc)
+
