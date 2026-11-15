@@ -150,3 +150,24 @@ async def test_br_win_with_foreign_team_is_refused(h, pool):
     await h.press(ADMIN_ID, "adm", f"br:win:{s1['id']}:{s2['team_a_id']}")
     assert "не играет" in h.last()
     assert (await _rows(pool, "semi"))[0]["winner_id"] is None
+
+
+def _last_datas(h) -> list[str]:
+    """callback_data of the most recent inline keyboard the bot showed."""
+    for m in reversed(h.tg.requests):
+        rm = getattr(m, "reply_markup", None)
+        if rm is not None and getattr(rm, "inline_keyboard", None):
+            return [b.callback_data for row in rm.inline_keyboard for b in row]
+    return []
+
+
+async def test_played_pair_disappears_from_editor(h, pool):
+    await _bracket(pool, 4)
+    s1, s2 = await _rows(pool, "semi")
+    await h.press(ADMIN_ID, "adm", "br:edit")
+    assert f"br:win:{s1['id']}:{s1['team_a_id']}" in _last_datas(h)
+    await h.press(ADMIN_ID, "adm", f"br:win:{s1['id']}:{s1['team_a_id']}")
+    datas = _last_datas(h)
+    assert not any(d.startswith(f"br:win:{s1['id']}:") or d == f"br:del:{s1['id']}" for d in datas)
+    assert any(d.startswith(f"br:win:{s2['id']}:") for d in datas)  # the unplayed semi is still there
+    assert "Сыграно пар: 1" in h.last()

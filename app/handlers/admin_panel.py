@@ -552,24 +552,30 @@ async def bracket_stage(cb: CallbackQuery, state: FSMContext, svc: Services) -> 
 async def bracket_edit(cb: CallbackQuery, svc: Services) -> None:
     await cb.answer()
     async with svc.team.pool.acquire() as conn:
+        # сыгранные пары (победитель выбран) из списка убираются - остаются только те, что ещё ждут результата
         rows = await conn.fetch(
-            "SELECT m.id, m.status, m.winner_id, s.title, "
-            "ta.name AS a, ta.id AS aid, tb.name AS b, tb.id AS bid "
+            "SELECT m.id, s.title, ta.name AS a, ta.id AS aid, tb.name AS b, tb.id AS bid "
             "FROM matches m JOIN stages s ON s.code = m.stage_code "
             "JOIN teams ta ON ta.id = m.team_a_id JOIN teams tb ON tb.id = m.team_b_id "
             "WHERE m.tournament_id = (SELECT id FROM tournaments WHERE status = 'active') "
+            "  AND m.status <> 'finished' "
             "ORDER BY s.sort_order, m.id"
         )
-    if not rows:
+        played = await conn.fetchval(
+            "SELECT count(*) FROM matches WHERE status = 'finished' "
+            "AND tournament_id = (SELECT id FROM tournaments WHERE status = 'active')"
+        )
+    if not rows and not played:
         await show(cb, "ℹ️ Сетка пуста.", akb.to_admin())
         return
     lines = ["✏️ <b>Редактирование сетки</b>\n"]
+    if played:
+        lines.append(f"✅ Сыграно пар: {played}\n")
+    if not rows:
+        lines.append("Все готовые пары сыграны. Новые пары появятся, когда определятся их участники.")
     kb_rows = []
     for r in rows:
-        win = ""
-        if r["status"] == "finished":
-            win = " ✅"
-        lines.append(f"{r['title']}: {r['a']} vs {r['b']}{win}")
+        lines.append(f"{esc(r['title'])}: {esc(r['a'])} vs {esc(r['b'])}")
         kb_rows.append([
             B(text=f"🏆 {r['a'][:12]}", callback_data=f"br:win:{r['id']}:{r['aid']}"),
             B(text=f"🏆 {r['b'][:12]}", callback_data=f"br:win:{r['id']}:{r['bid']}"),
@@ -578,7 +584,6 @@ async def bracket_edit(cb: CallbackQuery, svc: Services) -> None:
     kb_rows.append([B(text="🔄 Обновить картинку", callback_data="br:refresh")])
     kb_rows.append([B(text="🗑 Удалить все", callback_data="br:clear")])
     kb_rows.append([B(text="◀️ Назад", callback_data="adm:bracket")])
-    from aiogram.types import InlineKeyboardMarkup
     await show(cb, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows))
 
 
