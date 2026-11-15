@@ -58,6 +58,12 @@ async def run() -> int:
         from app.services.db_backup import AutoBackup
         backup = AutoBackup(bot, cfg, svc.archive.path, cfg.backup_every_hours)
         backup.start()
+        try:
+            from app.services.db_backup import offer_restore_if_empty
+            if await offer_restore_if_empty(bot, cfg):
+                log.warning("Started with an EMPTY database; offered the admin to restore the pinned backup")
+        except Exception:
+            log.exception("restore offer failed")
         log.info("Auto backup: %s", f"every {cfg.backup_every_hours} h" if cfg.backup_every_hours else "off")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types(), handle_signals=True)
     finally:

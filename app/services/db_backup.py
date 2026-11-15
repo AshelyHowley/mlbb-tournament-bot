@@ -63,7 +63,7 @@ def _has_data(db_bytes: bytes) -> bool:
 
 
 async def send_backup(bot, chat_id: int, cfg, archive_path: Optional[str], *, label: str = "",
-                      silent: bool = False) -> list[tuple[str, bytes]]:
+                      silent: bool = False, pin: bool = True) -> list[tuple[str, bytes]]:
     """Делает копии tournament.db и player_archive.db и отправляет их `chat_id`.
     Возвращает отправленное [(имя, байты)]."""
     import asyncio
@@ -84,12 +84,51 @@ async def send_backup(bot, chat_id: int, cfg, archive_path: Optional[str], *, la
         if len(data) > TELEGRAM_FILE_LIMIT:
             await bot.send_message(chat_id, f"⚠️ {name}.db больше 50 МБ - Telegram не даст его отправить.")
             continue
-        await bot.send_document(
+        msg = await bot.send_document(
             chat_id, BufferedInputFile(data, filename=f"{name}_{stamp}.db"),
             caption=f"💾 {label}{name}.db · {stamp}", disable_notification=silent,
         )
         sent.append((name, data))
+        # пустую базу не закрепляем никогда: иначе после «сервер всё стёр» она вытеснит хорошую копию
+        if pin and name == "tournament" and await asyncio.to_thread(_has_data, data):
+            await _pin(bot, chat_id, msg.message_id)
     return sent
+
+
+async def _pin(bot, chat_id: int, message_id: int) -> None:
+    """Последняя копия базы - закреплённое сообщение в чате с админом: оттуда её достаёт
+    «📌 Из последней автокопии», даже если сервер стёр всё. Старые закрепы снимаем,
+    чтобы закреплённой всегда была самая свежая копия."""
+    try:
+        await bot.unpin_all_chat_messages(chat_id)
+        await bot.pin_chat_message(chat_id, message_id, disable_notification=True)
+    except Exception:  # закрепить не вышло - сама копия всё равно отправлена
+        import logging
+        logging.getLogger(__name__).warning("could not pin the backup message", exc_info=True)
+
+
+async def find_pinned_backup(bot, chat_id: int):
+    """Закреплённое сообщение с копией tournament_*.db, присланной этим ботом, или None."""
+    try:
+        chat = await bot.get_chat(chat_id)
+    except Exception:
+        return None
+    m = getattr(chat, "pinned_message", None)
+    doc = getattr(m, "document", None) if m else None
+    if not doc or not (doc.file_name or "").startswith("tournament_"):
+        return None
+    me = await bot.me()
+    if m.from_user is not None and m.from_user.id != me.id:
+        return None  # закрепил кто-то другой - не наша копия
+    return m
+
+
+def has_data(path: str) -> bool:
+    """Есть ли в базе по пути `path` хоть что-то (для проверки «сервер стёр базу»)."""
+    try:
+        return _has_data(snapshot(path))
+    except (FileNotFoundError, sqlite3.DatabaseError):
+        return False
 
 
 class AutoBackup:
@@ -205,3 +244,28 @@ def restore_into(src_path: str, dst_path: str) -> None:
     finally:
         dst.close()
         src.close()
+
+
+async def offer_restore_if_empty(bot, cfg) -> bool:
+    """При запуске: база пустая (сервер её стёр), а в чате с админом закреплена копия -
+    предлагаем восстановить одной кнопкой. Сами ничего не заменяем: решает админ."""
+    import asyncio
+
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    path = sqlite_path(cfg.database_url)
+    if not path or await asyncio.to_thread(has_data, path):
+        return False
+    pinned = await find_pinned_backup(bot, cfg.admin_id)
+    if pinned is None:
+        return False
+    await bot.send_message(
+        cfg.admin_id,
+        "⚠️ <b>Бот запустился с пустой базой</b>\n\n"
+        "Похоже, сервер стёр данные (например, при деплое). В чате закреплена последняя копия: "
+        f"<b>{pinned.document.file_name}</b>.\n\nВосстановить из неё?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📌 Восстановить из копии", callback_data="adm:restore:pinned")],
+        ]),
+    )
+    return True

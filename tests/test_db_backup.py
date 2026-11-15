@@ -174,3 +174,89 @@ async def test_restore_only_for_main_admin(h, pool, uploaded):
     await h.press(5, "someone1", "adm:restore")
     await h.media(5, "someone1", "document", "f1")
     assert not any("Проверьте файл" in t for t in h.texts())
+
+
+# ------------------------------------------------------------------ pinned backup: one-button restore
+from types import SimpleNamespace  # noqa: E402
+
+from aiogram.methods import PinChatMessage  # noqa: E402
+
+from app.services import db_backup  # noqa: E402
+
+
+def _pins(h):
+    return [m for m in h.tg.requests if isinstance(m, PinChatMessage)]
+
+
+async def test_backup_with_data_is_pinned_empty_is_not(h, pool):
+    await h.press(ADMIN_ID, "adm", "adm:backup")          # empty database
+    assert _pins(h) == []
+    await make_team(pool, 1, "Alpha")
+    h.clear()
+    await h.press(ADMIN_ID, "adm", "adm:backup")
+    (pin,) = _pins(h)
+    main = next(d for d in _docs(h) if d.document.filename.startswith("tournament_"))
+    assert pin.chat_id == ADMIN_ID and pin.disable_notification is True
+    assert main.chat_id == ADMIN_ID  # exactly one pin: the tournament copy, not the archive one
+
+
+def _fake_pinned(data: bytes, name="tournament_2026-11-15_12-00.db", from_id=4242):
+    doc = SimpleNamespace(file_name=name, file_size=len(data), _data=data)
+    return SimpleNamespace(document=doc, from_user=SimpleNamespace(id=from_id))
+
+
+async def test_restore_from_pinned_copy_in_one_button(h, pool, monkeypatch):
+    await make_team(pool, 1, "Alpha")
+    await make_team(pool, 2, "Bravo")
+    await h.press(ADMIN_ID, "adm", "adm:backup")
+    good = next(d for d in _docs(h) if d.document.filename.startswith("tournament_")).document.data
+    async with pool.acquire() as c:                                   # the server "wiped" everything
+        await c.execute("DELETE FROM teams")
+
+    async def fake_find(bot, chat_id):
+        return _fake_pinned(good)
+
+    async def fake_download(bot, document):
+        return document._data
+
+    monkeypatch.setattr(db_backup, "find_pinned_backup", fake_find)
+    monkeypatch.setattr(admin_panel, "_download", fake_download)
+    h.clear()
+    await h.press(ADMIN_ID, "adm", "adm:restore:pinned")
+    assert "команд: <b>2</b>" in h.last() and "tournament_2026-11-15_12-00.db" in h.last()
+    await h.press(ADMIN_ID, "adm", "adm:restore:ok")
+    assert "База восстановлена" in h.last()
+    assert _pins(h) == []  # the safety copy of the wiped (empty) DB must not replace the good pin
+    async with pool.acquire() as c:
+        assert await c.fetchval("SELECT count(*) FROM teams") == 2
+
+
+async def test_restore_pinned_when_nothing_pinned(h, pool, monkeypatch):
+    async def none(bot, chat_id):
+        return None
+    monkeypatch.setattr(db_backup, "find_pinned_backup", none)
+    await h.press(ADMIN_ID, "adm", "adm:restore:pinned")
+    assert "Закреплённой копии нет" in h.last()
+
+
+async def test_find_pinned_backup_ignores_foreign_pins(h, monkeypatch):
+    async def chat_with(m):
+        async def get_chat(chat_id):
+            return SimpleNamespace(pinned_message=m)
+        return get_chat
+    monkeypatch.setattr(h.bot, "get_chat", await chat_with(_fake_pinned(b"x")))
+    assert await db_backup.find_pinned_backup(h.bot, ADMIN_ID) is not None
+    monkeypatch.setattr(h.bot, "get_chat", await chat_with(_fake_pinned(b"x", from_id=1)))   # pinned by the admin
+    assert await db_backup.find_pinned_backup(h.bot, ADMIN_ID) is None
+    monkeypatch.setattr(h.bot, "get_chat", await chat_with(_fake_pinned(b"x", name="photo.jpg")))
+    assert await db_backup.find_pinned_backup(h.bot, ADMIN_ID) is None
+
+
+async def test_startup_offers_restore_only_when_db_empty(h, pool, monkeypatch):
+    async def fake_find(bot, chat_id):
+        return _fake_pinned(b"x")
+    monkeypatch.setattr(db_backup, "find_pinned_backup", fake_find)
+    assert await db_backup.offer_restore_if_empty(h.bot, h.svc.cfg) is True
+    assert "пустой базой" in h.last() and "adm:restore:pinned" in str(h.tg.requests[-1].reply_markup)
+    await make_team(pool, 1, "Alpha")
+    assert await db_backup.offer_restore_if_empty(h.bot, h.svc.cfg) is False

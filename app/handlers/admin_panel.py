@@ -156,16 +156,18 @@ async def db_restore_start(cb: CallbackQuery, state: FSMContext, svc: Services) 
         "Перешлите сюда файл копии, который присылал бот:\n"
         "• <code>tournament_….db</code> - команды, соло, сетка, история\n"
         "• <code>player_archive_….db</code> - архив игроков\n\n"
-        "Перед заменой я покажу, что в файле, и пришлю вам копию текущей базы.",
-        _restore_cancel_kb(),
+        "Перед заменой я покажу, что в файле, и пришлю вам копию текущей базы.\n\n"
+        "📌 Или возьмите последнюю копию, которую бот закрепил в этом чате:",
+        InlineKeyboardMarkup(inline_keyboard=[
+            [B(text="📌 Из последней автокопии", callback_data="adm:restore:pinned")],
+            [B(text="❌ Отмена", callback_data="adm:restore:no")],
+        ]),
     )
 
 
 @router.message(RestoreDb.waiting_file, F.document)
 async def db_restore_file(message: Message, state: FSMContext, svc: Services) -> None:
-    import os
-    import tempfile
-    from app.services.db_backup import TELEGRAM_DOWNLOAD_LIMIT, BadBackup, inspect_backup
+    from app.services.db_backup import TELEGRAM_DOWNLOAD_LIMIT
 
     if not svc.cfg.is_bot_admin(message.from_user.id):
         await state.clear()
@@ -175,6 +177,15 @@ async def db_restore_file(message: Message, state: FSMContext, svc: Services) ->
         await message.answer("⚠️ Файл больше 20 МБ - бот не может скачать его из Telegram.", reply_markup=_restore_cancel_kb())
         return
     data = await _download(message.bot, doc)
+    await _prepare_restore(message.bot, message.chat.id, state, data)
+
+
+async def _prepare_restore(bot, chat_id: int, state: FSMContext, data: bytes, source: str = "") -> None:
+    """Проверяет присланную/закреплённую копию и показывает экран подтверждения."""
+    import os
+    import tempfile
+    from app.services.db_backup import BadBackup, inspect_backup
+
     fd, tmp = tempfile.mkstemp(suffix=".db", prefix="restore_")
     with os.fdopen(fd, "wb") as f:
         f.write(data)
@@ -182,7 +193,9 @@ async def db_restore_file(message: Message, state: FSMContext, svc: Services) ->
         info = await asyncio.to_thread(inspect_backup, tmp)
     except BadBackup as e:
         os.unlink(tmp)
-        await message.answer(f"⚠️ {e}\n\nПришлите другой файл или нажмите «Отмена».", reply_markup=_restore_cancel_kb())
+        await bot.send_message(chat_id, f"⚠️ {e}\n\nПришлите другой файл или нажмите «Отмена».",
+                               reply_markup=_restore_cancel_kb())
+        await state.set_state(RestoreDb.waiting_file)
         return
     old = (await state.get_data()).get("restore_tmp")
     if old and os.path.exists(old):
@@ -194,14 +207,37 @@ async def db_restore_file(message: Message, state: FSMContext, svc: Services) ->
                 f"📚 турниров в истории: <b>{info['history']}</b>")
     else:
         what = f"Архив игроков:\n🗂 игроков: <b>{info['players']}</b>"
-    await message.answer(
-        f"♻️ <b>Проверьте файл</b>\n\n{what}\n\n"
+    await bot.send_message(
+        chat_id,
+        f"♻️ <b>Проверьте файл</b>{source}\n\n{what}\n\n"
         "⚠️ Текущие данные будут <b>заменены</b> данными из файла. Копию текущей базы я пришлю перед заменой.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [B(text="⚠️ Заменить базу", callback_data="adm:restore:ok")],
             [B(text="❌ Отмена", callback_data="adm:restore:no")],
         ]),
     )
+
+
+@router.callback_query(F.data == "adm:restore:pinned")
+async def db_restore_pinned(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
+    """Восстановление из копии, которую бот сам закрепил в чате с админом - без пересылки файла."""
+    from app.services.db_backup import TELEGRAM_DOWNLOAD_LIMIT, find_pinned_backup
+
+    if not svc.cfg.is_bot_admin(cb.from_user.id):
+        await _ack(cb, "Только для главного админа.")
+        return
+    await _ack(cb, "Ищу закреплённую копию...")
+    pinned = await find_pinned_backup(cb.bot, cb.from_user.id)
+    if pinned is None:
+        await state.set_state(RestoreDb.waiting_file)
+        await show(cb, "⚠️ Закреплённой копии нет. Перешлите файл копии вручную.", _restore_cancel_kb())
+        return
+    if pinned.document.file_size and pinned.document.file_size > TELEGRAM_DOWNLOAD_LIMIT:
+        await show(cb, "⚠️ Копия больше 20 МБ - бот не может скачать её из Telegram.", akb.to_admin())
+        return
+    data = await _download(cb.bot, pinned.document)
+    await _prepare_restore(cb.bot, cb.from_user.id, state, data,
+                           source=f"\n📌 {esc(pinned.document.file_name or 'закреплённая копия')}")
 
 
 @router.message(RestoreDb.waiting_file)
@@ -238,10 +274,12 @@ async def db_restore_apply(cb: CallbackQuery, state: FSMContext, svc: Services) 
     target = sqlite_path(svc.cfg.database_url) if kind == "tournament" else svc.archive.path
     try:
         # страховка: текущее состояние - админу, до того как его перезапишем
-        await send_backup(cb.bot, cb.from_user.id, svc.cfg, svc.archive.path, label="До восстановления: ")
+        await send_backup(cb.bot, cb.from_user.id, svc.cfg, svc.archive.path, label="До восстановления: ",
+                          pin=False)  # страховка не должна вытеснить закреплённую хорошую копию
         await asyncio.to_thread(restore_into, tmp, target)
         if kind == "tournament":
             await migrate(svc.team.pool)  # копия могла быть сделана старой версией бота
+            await svc.archive.import_from_db(svc.team.pool)  # архив игроков дополняется из базы
         info = await asyncio.to_thread(inspect_backup, target)
     except Exception:
         log.exception("database restore failed")
