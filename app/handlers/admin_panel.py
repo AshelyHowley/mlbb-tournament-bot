@@ -108,6 +108,44 @@ async def cb_admin(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
     await _menu(cb, svc, state)
 
 
+# ------------------------------------------------------------------ backup
+@router.callback_query(F.data == "adm:backup")
+async def db_backup(cb: CallbackQuery, svc: Services) -> None:
+    """Главный админ получает в Telegram копии базы и архива игроков (там личные данные -
+    заместителям кнопка не показывается и не работает)."""
+    if not svc.cfg.is_bot_admin(cb.from_user.id):
+        await _ack(cb, "Только для главного админа.")
+        return
+    await _ack(cb, "Готовлю копию...")
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from aiogram.types import BufferedInputFile
+    from app.services.db_backup import TELEGRAM_FILE_LIMIT, snapshot, sqlite_path
+
+    stamp = datetime.now(ZoneInfo(svc.cfg.timezone)).strftime("%Y-%m-%d_%H-%M")
+    files = [("tournament", sqlite_path(svc.cfg.database_url)), ("player_archive", svc.archive.path)]
+    sent = 0
+    for name, path in files:
+        if not path:
+            continue
+        try:
+            data = await asyncio.to_thread(snapshot, path)
+        except FileNotFoundError:
+            continue
+        if len(data) > TELEGRAM_FILE_LIMIT:
+            await cb.bot.send_message(cb.from_user.id, f"⚠️ {name}.db больше 50 МБ - Telegram не даст его отправить.")
+            continue
+        await cb.bot.send_document(
+            cb.from_user.id, BufferedInputFile(data, filename=f"{name}_{stamp}.db"),
+            caption=f"💾 {name}.db · {stamp}",
+        )
+        sent += 1
+    log.info("database backup sent to admin %s (%d file(s))", cb.from_user.id, sent)
+    text = ("✅ Копия базы отправлена. Сохраните файлы у себя." if sent
+            else "⚠️ Не нашёл файлов базы для копии.")
+    await show(cb, text, akb.to_admin())
+
+
 # ------------------------------------------------------------------ teams
 @router.callback_query(F.data.regexp(r"^adm:t:\d{1,6}$"))
 async def teams_list(cb: CallbackQuery, svc: Services) -> None:
