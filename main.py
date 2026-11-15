@@ -40,6 +40,7 @@ async def run() -> int:
 
     bot = build_bot(cfg)
     svc = build_services(cfg, pool, bot)
+    backup = None
     try:
         applied = await migrate(pool)
         log.info("Migrations applied: %s", applied or "none")
@@ -54,8 +55,14 @@ async def run() -> int:
         me = await bot.get_me()
         log.info("Bot started as @%s", me.username)
         dp = build_dispatcher(svc, pool)
+        from app.services.db_backup import AutoBackup
+        backup = AutoBackup(bot, cfg, svc.archive.path, cfg.backup_every_hours)
+        backup.start()
+        log.info("Auto backup: %s", f"every {cfg.backup_every_hours} h" if cfg.backup_every_hours else "off")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types(), handle_signals=True)
     finally:
+        if backup is not None:
+            await backup.shutdown()  # до закрытия сессии бота: копия уходит через Telegram
         await svc.bc.shutdown()
         await svc.result_notify.shutdown()
         await bot.session.close()

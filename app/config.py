@@ -22,6 +22,7 @@ _DEFAULTS = {
     "CHAT_URL": "https://t.me/MLBangBangTournamentChat",
     "TIMEZONE": "Europe/Moscow",
     "ACCESS_MODE": "private",  # fail closed: an absent setting never opens the bot to everyone
+    "BACKUP_EVERY_HOURS": "3",  # автокопия базы главному админу; 0 - выключить
 }
 _KEYS = ("BOT_TOKEN", "ADMIN_TELEGRAM_ID", "DATABASE_URL", "ALLOWED_USER_IDS", *_DEFAULTS)
 ACCESS_MODES = ("private", "public")
@@ -57,6 +58,7 @@ class Config:
     timezone: str = "Europe/Moscow"
     access_mode: str = "private"
     allowed_user_ids: frozenset = frozenset()
+    backup_every_hours: int = 3
 
     # Access and admin rights are deliberately separate questions.
     def is_bot_admin(self, user_id: int) -> bool:
@@ -180,6 +182,11 @@ def load_config(env_file: Optional[Path] = None, environ: Optional[Mapping[str, 
     except ValueError:
         problems.append("ALLOWED_USER_IDS must be a comma-separated list of positive integer Telegram IDs")
 
+    backup_hours = v["BACKUP_EVERY_HOURS"].strip()
+    if not (backup_hours.isdigit() and int(backup_hours) <= 24 * 7):
+        problems.append("BACKUP_EVERY_HOURS must be a whole number of hours (0 = off)")
+        backup_hours = "0"
+
     if problems:
         raise ConfigError("; ".join(problems))
 
@@ -194,4 +201,5 @@ def load_config(env_file: Optional[Path] = None, environ: Optional[Mapping[str, 
         chat_id=v["CHAT_ID"],
         chat_url=v["CHAT_URL"],
         timezone=v["TIMEZONE"],
+        backup_every_hours=int(backup_hours),
     )
