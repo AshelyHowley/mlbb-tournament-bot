@@ -26,7 +26,7 @@ def test_callback_data_within_telegram_limit():
     big = 10**18
     rows = [{"id": big, "name": LONG, "user_id": big, "full_name": LONG, "username": "u" * 32, "role": "JUNGLE",
              "team_a": LONG, "team_b": LONG, "stage_title": "Полуфинал", "team_a_id": big, "team_b_id": big - 1,
-             "candidate_id": big, "approved_at": datetime.datetime('now'), "completed_at": datetime.datetime('now')}]
+             "candidate_id": big, "approved_at": datetime.now(), "completed_at": datetime.now()}]
     match = {**rows[0], "status": "scheduled"}
     members = [SimpleNamespace(user_id=big, full_name=LONG, username="u" * 32, is_captain=False)]
     games = [{"id": big, "game_number": 5, "winner_name": LONG}]
@@ -70,9 +70,10 @@ def test_no_secrets_committed_to_source():
 
 def test_env_example_has_all_keys_and_no_secrets():
     text = (ROOT / ".env.example").read_text()
-    for key in ("BOT_TOKEN=", "ADMIN_TELEGRAM_ID=", "DATABASE_URL=", "CHANNEL_ID=@yuliataetae", "CHAT_ID=@MLBangBangTournamentChat"):
+    for key in ("BOT_TOKEN=", "ADMIN_TELEGRAM_ID=", "DATABASE_URL=sqlite", "CHANNEL_ID=@", "CHAT_ID=@"):
         assert key in text
-    assert "BOT_TOKEN=\n" in text and ":PASSWORD@" in text
+    # no real Telegram bot token (<digits>:<long url-safe secret>) may be committed
+    assert not re.search(r"\d{6,}:[A-Za-z0-9_-]{30,}", text)
 
 
 def test_sql_is_parametrised_in_repositories():

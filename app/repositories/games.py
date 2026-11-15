@@ -5,7 +5,7 @@ from __future__ import annotations
 
 async def lock_match(conn, match_id: int) -> None:
     """Serialises every game submission for this series (also the row the DB trigger itself locks)."""
-    await conn.execute("SELECT 1 FROM matches WHERE id = $1 FOR UPDATE", match_id)
+    return None  # SQLite: the surrounding BEGIN IMMEDIATE transaction already holds the write lock
 
 
 async def game_count(conn, match_id: int) -> int:
@@ -13,11 +13,12 @@ async def game_count(conn, match_id: int) -> int:
 
 
 async def games(conn, match_id: int) -> list[dict]:
+    # SQLite schema (001_sqlite): game_no / winner_id; aliased to the names the callers use
     return await conn.fetch(
         """
-        SELECT g.id, g.game_number, g.winner_team_id, t.name AS winner_name, g.created_by, g.created_at, g.updated_at
-          FROM match_games g JOIN teams t ON t.id = g.winner_team_id
-         WHERE g.match_id = $1 ORDER BY g.game_number
+        SELECT g.id, g.game_no AS game_number, g.winner_id AS winner_team_id, t.name AS winner_name
+          FROM match_games g JOIN teams t ON t.id = g.winner_id
+         WHERE g.match_id = $1 ORDER BY g.game_no
         """,
         match_id,
     )

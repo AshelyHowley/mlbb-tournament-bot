@@ -22,6 +22,7 @@ def main_menu(cfg: Config, reg: Optional[MyRegistration], is_admin: bool) -> Inl
         if reg.has_team:
             rows.append([B(text="👥 Моя команда", callback_data="team")])
     rows.append([B(text="🏆 Турнирная сетка", callback_data="bracket")])
+    rows.append([B(text="⭐ Отзывы", callback_data="reviews")])
     rows.append([B(text="🏅 Зал славы", callback_data="hof")])
     rows.append([B(text="📢 Канал", url=cfg.channel_url), B(text="💬 Чат", url=cfg.chat_url)])
     if is_admin:
@@ -57,11 +58,22 @@ def team_role() -> InlineKeyboardMarkup:
     ])
 
 
-def confirm_reg() -> InlineKeyboardMarkup:
-    return kb([
-        [B(text="✅ Подтвердить", callback_data="reg:confirm")],
-        [B(text="◀️ Назад", callback_data="reg:back"), B(text="❌ Отмена", callback_data="reg:cancel")],
-    ])
+def confirm_reg(edit: bool = False) -> InlineKeyboardMarkup:
+    rows = [[B(text="✅ Подтвердить", callback_data="reg:confirm")]]
+    if edit:  # solo: data pre-filled from the player archive, only roles / stars can be corrected
+        rows.append([B(text="✏️ Изменить роли", callback_data="reg:edit:roles"),
+                     B(text="⭐ Изменить звёзды", callback_data="reg:edit:stars")])
+    rows.append([B(text="◀️ Назад", callback_data="reg:back"), B(text="❌ Отмена", callback_data="reg:cancel")])
+    return kb(rows)
+
+
+def keep_value(label: str, callback_data: str, back: bool = True, cancel_cb: str = "reg:cancel") -> InlineKeyboardMarkup:
+    """A text-input prompt with a one-tap button to reuse the value saved in the player archive."""
+    row = []
+    if back:
+        row.append(B(text="◀️ Назад", callback_data="reg:back"))
+    row.append(B(text="❌ Отмена", callback_data=cancel_cb))
+    return kb([[B(text=label, callback_data=callback_data)], row])
 
 
 def roles() -> InlineKeyboardMarkup:
@@ -97,3 +109,9 @@ def roles_multi(selected: list[str] | None = None) -> InlineKeyboardMarkup:
     rows.append([B(text="✅ Готово", callback_data="reg:role:done")])
     rows.append([B(text="◀️ Назад", callback_data="reg:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def reviews_menu() -> InlineKeyboardMarkup:
+    return kb([
+        [B(text="✍️ Написать отзыв", callback_data="reviews:write")],
+        [B(text="◀️ В меню", callback_data="menu")],
+    ])

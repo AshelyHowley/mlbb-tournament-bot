@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -10,6 +11,22 @@ from app.database.pool import create_pool
 
 log = logging.getLogger(__name__)
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+
+
+def _statements(sql: str) -> list[str]:
+    """Split a script on ';' but keep CREATE TRIGGER ... BEGIN ...; ...; END in one piece."""
+    out, buf = [], ""
+    for part in sql.split(";"):
+        buf += part + ";"
+        if sqlite3.complete_statement(buf):
+            stmt = buf.strip().rstrip(";").strip()
+            if stmt:
+                out.append(stmt)
+            buf = ""
+    stmt = buf.strip().rstrip(";").strip()
+    if stmt:
+        out.append(stmt)
+    return out
 
 
 async def migrate(pool) -> list[str]:
@@ -29,7 +46,7 @@ async def migrate(pool) -> list[str]:
             # Strip full-line comments, then split statements
             lines = [ln for ln in sql.splitlines() if not ln.strip().startswith("--")]
             clean = "\n".join(lines)
-            for stmt in [s.strip() for s in clean.split(";") if s.strip()]:
+            for stmt in _statements(clean):
                 await conn.execute(stmt)
             await conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version) VALUES (?)", path.stem

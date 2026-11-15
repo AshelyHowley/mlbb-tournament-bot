@@ -1,123 +1,165 @@
-"""Bracket image - Sun Straik style."""
+"""Картинка турнирной сетки (Pillow).
+
+Раскладка строится по реальным связям next_match_id, а не по порядку в списке.
+Строки должны содержать: id, stage, team_a, team_b, winner, next_match_id.
+Функция синхронная: из async-кода вызывайте через asyncio.to_thread(...).
+"""
+from __future__ import annotations
+
+import os
+from functools import lru_cache
 from io import BytesIO
-try:
-    from PIL import Image, ImageDraw, ImageFont
-except ImportError:
-    Image = None
 
-def _f(sz):
-    for name in ["segoeui.ttf", "arial.ttf", "calibri.ttf"]:
-        try: return ImageFont.truetype(name, sz)
-        except: pass
-    return ImageFont.load_default()
+from PIL import Image, ImageDraw, ImageFont
 
-def render_bracket_image(matches: list[dict], title: str = "Турнир", subtitle: str = "Single Elimination") -> bytes:
-    # Layout
-    ML, MR, MT, MB = 60, 60, 90, 60
-    COL = 240
-    SW, SH = 170, 22
-    PH, GAP = 48, 12
-    # Colors
-    BG = (26, 28, 34)
-    FILL = (38, 100, 120)
-    FILL_U = (50, 55, 65)
-    LN = (90, 95, 105)
-    TXT = (230, 235, 240)
-    TXT_DIM = (150, 155, 165)
-    ICON = (70, 150, 170)
-    STAGE = {"playin": "ОТБОР", "r16": "1/16", "r8": "1/8", "r4": "1/4", "semi": "1/2", "final": "ФИНАЛ", "finalist": "ФИНАЛИСТ"}
-    if not matches: matches = []
-    all_stages = ["playin", "r16", "r8", "r4", "semi", "final", "finalist"]
-    by = {}
-    for m in matches:
-        st = m.get("stage_code") or m.get("stage", "r8")
-        if st not in by: by[st] = []
-        by[st].append(m)
-    stages = [s for s in all_stages if s in by]
-    if not stages:
-        stages = ["r8"]
-        by["r8"] = []
-    n_col = len(stages)
-    max_n = max((len(by.get(s, [])) for s in stages), default=1)
-    W = ML + n_col * COL + MR
-    H = MT + max_n * (PH + GAP) + MB
-    img = Image.new("RGB", (W, H), BG)
-    d = ImageDraw.Draw(img)
-    fnt = _f(11)
-    fnt_t = _f(16)
-    fnt_s = _f(10)
-    # Title
-    d.text((W//2, 18), title, fill=TXT, font=fnt_t, anchor="mt")
-    d.text((W//2, 38), subtitle, fill=TXT_DIM, font=fnt_s, anchor="mt")
-    positions = {}
-    # Draw slots
-    for si, st in enumerate(stages):
-        matches_st = by[st]
-        n = len(matches_st)
-        total_h = n * (PH + GAP) - GAP
-        start_y = MT + (max_n * (PH + GAP) - total_h) // 2
-        x = ML + si * COL
-        positions[st] = []
-        # Stage label
-        d.text((x + SW//2, MT - 18), STAGE.get(st, st.upper()) + " >", fill=TXT_DIM, font=fnt, anchor="mt")
-        d.line([(x, MT - 5), (x + SW, MT - 5)], fill=(60, 65, 75), width=1)
-        for i, m in enumerate(matches_st):
-            y0 = start_y + i * (PH + GAP)
-            cy = y0 + PH // 2
-            positions[st].append((x, cy, y0))
-            a = (m.get("team_a") or "?")[:16]
-            b = (m.get("team_b") or "?")[:16]
-            if st == "finalist":
-                winner = m.get("winner") or (a if a != "?" else "?")
-                d.rounded_rectangle([x, y0, x+SW, y0+PH-4], 4, fill=FILL if winner != "?" else FILL_U)
-                if winner != "?":
-                    d.ellipse([x+4, y0+PH//2-8, x+20, y0+PH//2+8], fill=ICON)
-                d.text((x+24, y0+PH//2-6), winner, fill=TXT, font=fnt)
-            else:
-                # Team A
-                d.rounded_rectangle([x, y0, x+SW, y0+SH], 4, fill=FILL if a != "?" else FILL_U)
-                if a != "?":
-                    d.ellipse([x+4, y0+3, x+18, y0+17], fill=ICON)
-                d.text((x+22, y0+3), a, fill=TXT, font=fnt)
-                # Team B
-                d.rounded_rectangle([x, y0+SH+2, x+SW, y0+PH-2], 4, fill=FILL if b != "?" else FILL_U)
-                if b != "?":
-                    d.ellipse([x+4, y0+SH+5, x+18, y0+SH+19], fill=ICON)
-                d.text((x+22, y0+SH+5), b, fill=TXT, font=fnt)
-    # Draw lines
-    for si, st in enumerate(stages[:-1]):
-        next_st = stages[si + 1]
-        if st not in positions or next_st not in positions: continue
-        pos = positions[st]
-        next_pos = positions[next_st]
-        n = len(pos)
-        next_n = len(next_pos)
-        if n == 0 or next_n == 0: continue
-        mid_x = pos[0][0] + SW + 25
-        if st == "playin":
-            next_matches = by.get(next_st, [])
-            empty_idx = [i for i, m in enumerate(next_matches) if (m.get("team_a") or "?") == "?" or (m.get("team_b") or "?") == "?"]
-            if not empty_idx: empty_idx = list(range(next_n - min(n, next_n), next_n))
-            for i, (x, cy, _) in enumerate(pos):
-                if i < len(empty_idx) and empty_idx[i] < next_n:
-                    nx, ny, _ = next_pos[empty_idx[i]]
-                    d.line([(x + SW, cy), (mid_x, cy)], fill=LN, width=1)
-                    d.line([(mid_x, cy), (mid_x, ny)], fill=LN, width=1)
-                    d.line([(mid_x, ny), (nx - 2, ny)], fill=LN, width=1)
+S = 2                                   # суперсэмплинг: рисуем в 2x, картинка получается чёткой
+ML, MR, MT, MB = 50, 50, 80, 50
+COL, SW, SH, PH, GAP = 240, 176, 22, 52, 18
+
+BG, FILL, FILL_WIN, FILL_LOSE, FILL_EMPTY = (22, 24, 30), (36, 98, 118), (46, 130, 98), (40, 56, 64), (48, 52, 62)
+LN, TXT, TXT_DIM, ICON, GOLD = (90, 100, 110), (230, 235, 240), (140, 150, 160), (60, 140, 160), (222, 184, 70)
+
+STAGE_ORDER = ["playin", "r32", "r16", "r8", "r4", "semi", "final", "finalist"]
+STAGE_LABEL = {"playin": "ОТБОР", "r32": "1/32", "r16": "1/16", "r8": "1/8", "r4": "1/4",
+               "semi": "1/2", "final": "ФИНАЛ", "finalist": "ЧЕМПИОН"}
+THIRD_LABEL = "МАТЧ ЗА 3 МЕСТО"
+THIRD_GAP = 34                          # место под подпись над матчем за 3-е место
+
+_FONT_CANDIDATES = [
+    os.environ.get("BRACKET_FONT", ""),
+    os.path.join(os.path.dirname(__file__), "..", "assets", "fonts", "NotoSans-Regular.ttf"),
+    "segoeui.ttf", "arial.ttf",                                            # Windows
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",                     # Linux
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",                        # macOS
+]
+
+
+@lru_cache(maxsize=16)
+def _font(size: int):
+    for path in _FONT_CANDIDATES:
+        if not path:
+            continue
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size)          # Pillow >= 10.1; кириллицу может не знать
+
+
+def _fit(text: str, font, max_w: float) -> str:
+    """Обрезает по реальной ширине в пикселях и добавляет «…»."""
+    if font.getlength(text) <= max_w:
+        return text
+    while text and font.getlength(text + "…") > max_w:
+        text = text[:-1]
+    return text.rstrip() + "…"
+
+
+def _layout(rows: list[dict]):
+    nodes = {r["id"]: dict(r, children=[]) for r in rows if r.get("stage") not in ("finalist", "third")}
+    for n in nodes.values():
+        parent = nodes.get(n.get("next_match_id"))
+        if parent is not None:
+            parent["children"].append(n)
+    for n in nodes.values():
+        n["children"].sort(key=lambda c: c["id"])
+    roots = sorted((n for n in nodes.values() if n.get("next_match_id") not in nodes), key=lambda n: n["id"])
+
+    counter = [0]
+
+    def place(n):
+        if not n["children"]:
+            n["y"] = MT + counter[0] * (PH + GAP)
+            counter[0] += 1
         else:
-            for p_idx in range(min(n // 2, next_n)):
-                i = p_idx * 2
-                x1, cy1, _ = pos[i]
-                cy2 = pos[i+1][1] if i+1 < n else cy1
-                nx, ny, _ = next_pos[p_idx]
-                mid_y = (cy1 + cy2) // 2
-                d.line([(x1 + SW, cy1), (mid_x, cy1)], fill=LN, width=1)
-                if i+1 < n:
-                    d.line([(pos[i+1][0] + SW, cy2), (mid_x, cy2)], fill=LN, width=1)
-                    d.line([(mid_x, cy1), (mid_x, cy2)], fill=LN, width=1)
-                d.line([(mid_x, mid_y), (mid_x + 12, mid_y)], fill=LN, width=1)
-                d.line([(mid_x + 12, mid_y), (mid_x + 12, ny)], fill=LN, width=1)
-                d.line([(mid_x + 12, ny), (nx - 2, ny)], fill=LN, width=1)
+            for c in n["children"]:
+                place(c)
+            n["y"] = sum(c["y"] for c in n["children"]) / len(n["children"])
+
+    for r in roots:
+        place(r)
+    return nodes, roots, max(counter[0], 1)
+
+
+def render_bracket_image(rows: list[dict], title: str = "Турнир", subtitle: str = "Single Elimination") -> bytes:
+    rows = list(rows or [])
+    champion_row = next((r for r in rows if r.get("stage") == "finalist"), None)
+    third_row = next((r for r in rows if r.get("stage") == "third"), None)
+    nodes, roots, leaves = _layout(rows)
+
+    stages = [s for s in STAGE_ORDER if s != "finalist" and any(n["stage"] == s for n in nodes.values())]
+    if champion_row is not None:
+        stages.append("finalist")
+    n_col = max(len(stages), 1)
+
+    W = ML + n_col * COL + MR
+    H = MT + leaves * (PH + GAP) + MB
+    third_y = MT + leaves * (PH + GAP) + THIRD_GAP - GAP
+    if third_row is not None:
+        H = third_y + PH + MB
+    img = Image.new("RGB", (W * S, H * S), BG)
+    d = ImageDraw.Draw(img)
+    f, f_t, f_s = _font(11 * S), _font(16 * S), _font(10 * S)
+    sc = lambda v: int(round(v * S))
+
+    d.text((sc(W // 2), sc(14)), title, fill=TXT, font=f_t, anchor="mt")
+    d.text((sc(W // 2), sc(36)), subtitle, fill=TXT_DIM, font=f_s, anchor="mt")
+
+    col_of = {s: i for i, s in enumerate(stages)}
+    for s, i in col_of.items():
+        x = ML + i * COL
+        d.text((sc(x + SW // 2), sc(MT - 18)), STAGE_LABEL.get(s, s.upper()), fill=TXT_DIM, font=f_s, anchor="mt")
+        d.line([(sc(x), sc(MT - 6)), (sc(x + SW), sc(MT - 6))], fill=(55, 60, 70), width=S)
+
+    # --- линии (под коробками) ---
+    for n in nodes.values():
+        for c in n["children"]:
+            cx = ML + col_of[c["stage"]] * COL + SW
+            px = ML + col_of[n["stage"]] * COL
+            cy, py = c["y"] + PH / 2, n["y"] + PH / 2
+            mx = px - 20
+            d.line([(sc(cx), sc(cy)), (sc(mx), sc(cy)), (sc(mx), sc(py)), (sc(px), sc(py))], fill=LN, width=S)
+
+    # --- матчи ---
+    def slot(x, y, name, state):
+        fill = {"win": FILL_WIN, "lose": FILL_LOSE, "empty": FILL_EMPTY}.get(state, FILL)
+        d.rounded_rectangle([sc(x), sc(y), sc(x + SW), sc(y + SH)], sc(4), fill=fill)
+        label = name or "—"
+        if name:
+            d.ellipse([sc(x + 5), sc(y + 5), sc(x + 17), sc(y + SH - 5)], fill=GOLD if state == "win" else ICON)
+        d.text((sc(x + 23), sc(y + SH / 2)), _fit(label, f, sc(SW - 28)),
+               fill=TXT if name and state != "lose" else TXT_DIM, font=f, anchor="lm")
+
+    for n in nodes.values():
+        x = ML + col_of[n["stage"]] * COL
+        y = n["y"]
+        a, b, w = n.get("team_a"), n.get("team_b"), n.get("winner")
+        for k, name in enumerate((a, b)):
+            state = "empty" if not name else ("win" if w and name == w else "lose" if w else "normal")
+            slot(x, y + k * (SH + 2) + (0 if k == 0 else 0), name, state)
+
+    if third_row is not None:
+        col = col_of.get("final", max(n_col - 1 - (champion_row is not None), 0))
+        x = ML + col * COL
+        d.text((sc(x + SW // 2), sc(third_y - 14)), THIRD_LABEL, fill=TXT_DIM, font=f_s, anchor="mt")
+        a, b, w = third_row.get("team_a"), third_row.get("team_b"), third_row.get("winner")
+        for k, name in enumerate((a, b)):
+            state = "empty" if not name else ("win" if w and name == w else "lose" if w else "normal")
+            slot(x, third_y + k * (SH + 2), name, state)
+
+    final = next((n for n in roots if n["stage"] == "final"), roots[0] if roots else None)
+    if champion_row is not None and final is not None and "final" in col_of:
+        x = ML + col_of["finalist"] * COL
+        y = final["y"]
+        name = champion_row.get("winner") or champion_row.get("team_a") or final.get("winner")
+        d.rounded_rectangle([sc(x), sc(y), sc(x + SW), sc(y + PH - 4)], sc(6), fill=FILL_WIN if name else FILL_EMPTY,
+                            outline=GOLD if name else None, width=S)
+        d.text((sc(x + SW / 2), sc(y + (PH - 4) / 2)), _fit(name or "—", _font(13 * S), sc(SW - 16)),
+               fill=TXT, font=_font(13 * S), anchor="mm")
+        d.line([(sc(ML + col_of["final"] * COL + SW), sc(y + PH / 2)), (sc(x), sc(y + PH / 2))], fill=LN, width=S)
+
     buf = BytesIO()
-    img.save(buf, "PNG")
+    img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()

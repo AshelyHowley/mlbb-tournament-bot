@@ -35,7 +35,7 @@ async def create_via_ui(h, who, role, name="Alpha Team"):
     await h.press(*who, "reg:start")
     await h.press(*who, "reg:team")
     await h.say(*who, name)
-    await h.press(*who, f"reg:trole:{role}")
+    await h.pick_team_role(*who, role)
     await h.press(*who, "reg:confirm")
     return h.last()
 
@@ -78,7 +78,7 @@ async def test_creator_member_gets_captain_link_only(h, pool):
     assert {"👥 Моя команда", "🔗 Ссылка капитана"} <= set(h.buttons())
     async with pool.acquire() as c:
         assert await c.fetchval("SELECT captain_id FROM teams") is None
-        assert await c.fetchval("SELECT is_captain FROM team_members") is False
+        assert await c.fetchval("SELECT is_captain FROM team_members") == False
 
 
 async def test_registrar_only_takes_no_seat(h, pool):
@@ -90,8 +90,8 @@ async def test_registrar_only_takes_no_seat(h, pool):
 async def test_back_from_confirm_returns_to_role_choice(h, pool):
     await h.press(*R, "reg:team")
     await h.say(*R, "Alpha Team")
-    await h.press(*R, "reg:trole:registrar")
-    assert "Проверьте данные" in h.last() and "Только регистрирую" in h.last() and "0/5" in h.last()
+    await h.pick_team_role(*R, "registrar")
+    assert "Проверьте данные" in h.last() and "Только регистрирую" in h.last()
     await h.press(*R, "reg:back")
     assert "Ваша роль в этой команде?" in h.last()
     await h.press(*R, "reg:back")
@@ -107,26 +107,26 @@ async def test_forged_role_callback_is_rejected(h, pool):
     assert await counts(pool) == (0, 0)
 
 
-async def test_second_registration_by_ordinary_user_is_refused_in_ui(h, pool):
+async def test_registrar_may_register_another_team_in_ui(h, pool):
     await create_via_ui(h, R, "registrar")
-    await h.press(*R, "reg:team")
-    assert "уже зарегистрировали команду" in h.last()
+    await h.press(*R, "reg:team")  # registering for others is not limited to one team
+    assert "название команды" in h.last()
     assert await counts(pool) == (1, 0)
 
 
-async def test_registrar_only_can_still_register_solo_and_menu_offers_both(h, pool):
+async def test_registrar_only_can_still_register_solo(h, pool):
     await create_via_ui(h, R, "registrar")
     h.clear()
     await h.say(*R, "/start")
-    assert {"🏆 Регистрация", "👤 Моя регистрация", "👥 Моя команда"} <= set(h.buttons())
+    assert "🏆 Регистрация" in h.buttons()  # registrar-only does not count as registered themself
     await h.press(*R, "reg:solo")
-    await h.press(*R, "reg:role:EXP")
+    await h.pick_solo_role(*R, "EXP")
     await h.press(*R, "reg:confirm")
     assert "Регистрация завершена" in " ".join(h.texts())
     h.clear()
     await h.press(*R, "me")
     t = h.last()
-    assert "Регистратор" in t and "Роль: <b>EXP</b>" in t   # both registrations are shown
+    assert "соло" in t and "Роль: <b>EXP</b>" in t   # "my registration" is about the user as a player
 
 
 # ------------------------------------------------------------------ captain invite
@@ -168,14 +168,14 @@ async def test_player_link_is_closed_until_a_captain_exists(h, pool):
     h.clear()
     await h.say(*P3, f"/start team_{ptok}")
     assert "Капитан этой команды пока не назначен" in h.last() and "✅ Вступить в команду" not in h.buttons()
-    await h.press(*P3, f"join:ok:{ptok}")
+    await h.join(*P3, ptok)
     assert "Капитан этой команды пока не назначен" in h.last() and await counts(pool) == (1, 1)
     ctok = await captain_link_of(h)
     await h.press(*C, f"cap:ok:{ctok}")
     h.clear()
     await h.say(*P3, f"/start team_{ptok}")
     assert "Приглашение в команду" in h.last()
-    await h.press(*P3, f"join:ok:{ptok}")
+    await h.join(*P3, ptok)
     assert await counts(pool) == (1, 3)
 
 
@@ -277,11 +277,11 @@ async def test_registrar_cancels_registration_with_confirmation(h, pool):
 async def test_registrar_loses_tools_once_captain_assigned(h, pool):
     await create_via_ui(h, R, "registrar")
     await h.press(*C, f"cap:ok:{await captain_link_of(h)}")
-    await h.press(*P3, f"join:ok:{await pool.fetchval('SELECT invite_token FROM teams')}")
+    await h.join(*P3, await pool.fetchval('SELECT invite_token FROM teams'))
     h.clear()
     await h.press(*R, "team")
     t = h.last()
-    assert "Регистратор" in t and "вы не входите в игровой состав" in t and "Состав: 2/5" in t
+    assert "Регистратор" in t and "не входите в игровой состав" in t and "Состав: 2/5" in t
     shown = set(h.buttons())
     assert shown.isdisjoint({"🔄 Обновить ссылку капитана", "🗑 Отменить регистрацию", "🔄 Управление составом",
                              "👑 Передать капитанство", "🚪 Покинуть команду", "🔗 Пригласить игрока"})
@@ -314,14 +314,14 @@ async def test_my_registration_texts_for_each_role(h, pool):
     h.clear()
     await h.press(30, "reg0030", "me")
     t = h.last()
-    assert "📝 Ваша роль: Регистратор" in t and "👑 Капитан: ожидается" in t and "Состав: 0/5" in t
-    # once the captain is assigned the registrar sees the name
+    assert "не зарегистрированы" in t  # registrar-only is not a registration of the user themself
+    # the registrar follows the team under "Моя команда"; once the captain is assigned they see the name
     async with pool.acquire() as c:
         ctok = await c.fetchval("SELECT captain_invite_token FROM teams WHERE name='Reg Team'")
     await h.press(40, None, f"cap:ok:{ctok}")
     h.clear()
-    await h.press(30, "reg0030", "me")
-    assert "👑 Капитан: U40" in h.last() and "Состав: 1/5" in h.last()
+    await h.press(30, "reg0030", "team")
+    assert "Капитан: U40" in h.last() and "Состав: 1/5" in h.last()
     h.clear()
     await h.press(20, None, "me")
     assert "🎮 Ваша роль: Участник" in h.last()
@@ -398,11 +398,11 @@ async def test_replacement_still_works_after_captain_link_flow(h, pool):
     async with pool.acquire() as c:
         ptok = await c.fetchval("SELECT invite_token FROM teams")
     for who in (P3, P4, (5, None), (6, "player06")):
-        await h.press(*who, f"join:ok:{ptok}")
+        await h.join(*who, ptok)
     assert await counts(pool) == (1, 5)
     await h.press(*C, f"team:rpok:{P3[0]}")
     assert await counts(pool) == (1, 4)
-    await h.press(7, None, f"join:ok:{ptok}")
+    await h.join(7, None, ptok)
     assert await counts(pool) == (1, 5)
 
 

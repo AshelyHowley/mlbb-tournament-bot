@@ -8,6 +8,7 @@ from app.config import Config
 from app.services.admin import AdminService
 from app.services.broadcast import BroadcastService
 from app.services.deputy import DeputyService
+from app.services.player_archive import PlayerArchive
 from app.services.registration import RegistrationService
 from app.services.result_notify import ResultNotifyService
 from app.services.roles import RoleService
@@ -31,6 +32,7 @@ class Services:
     deputies: DeputyService
     result_notify: ResultNotifyService
     roles: RoleService
+    archive: PlayerArchive
 
     async def invite_link(self, token: str) -> str:
         me = await self.bot.me()  # cached by aiogram after the first call

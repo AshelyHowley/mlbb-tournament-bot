@@ -91,8 +91,14 @@ async def cb_unregister(cb: CallbackQuery, svc: Services) -> None:
                 team_name = row["name"]
                 members = await conn.fetch("SELECT user_id FROM team_members WHERE team_id = $1", row["id"])
                 member_ids = [m["user_id"] for m in members if m["user_id"] != uid]
+                # same order as AdminService.delete_team: unlink bracket references, drop the matches,
+                # then the team (members cascade; the captain row cannot be deleted on its own)
+                await conn.execute(
+                    "UPDATE matches SET next_match_id = NULL WHERE next_match_id IN "
+                    "(SELECT id FROM matches WHERE team_a_id = $1 OR team_b_id = $1 OR winner_id = $1)",
+                    row["id"],
+                )
                 await conn.execute("DELETE FROM matches WHERE team_a_id = $1 OR team_b_id = $1 OR winner_id = $1", row["id"])
-                await conn.execute("DELETE FROM team_members WHERE team_id = $1", row["id"])
                 await conn.execute("DELETE FROM teams WHERE id = $1", row["id"])
             # Solo case: remove solo registration
             await conn.execute(

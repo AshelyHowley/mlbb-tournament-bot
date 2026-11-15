@@ -69,7 +69,7 @@ async def test_send_flow_and_double_click(pool):
     assert (row["status"], row["sent"], row["blocked"], row["failed"]) == ("done", 1, 1, 0)
     assert [c for c, _ in bot.sent if c != 42] == [10]  # exactly one delivery to the reachable solo player
     async with pool.acquire() as c:
-        assert await c.fetchval("SELECT is_blocked FROM users WHERE telegram_id=11") is True
+        assert await c.fetchval("SELECT is_blocked FROM users WHERE telegram_id=11") == True
     assert await recipients(pool, "solo") == [10]
 
 

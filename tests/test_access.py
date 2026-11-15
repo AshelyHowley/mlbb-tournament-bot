@@ -187,7 +187,7 @@ async def test_no_configuration_leak_in_denials(g):
 
 
 async def test_updates_without_a_user_are_dropped_in_private_mode(g):
-    post = Message(message_id=1, date=datetime.datetime('now'), chat=Chat(id=-100123, type="channel"), text="hi")
+    post = Message(message_id=1, date=datetime.now(), chat=Chat(id=-100123, type="channel"), text="hi")
     await g.dp.feed_update(g.bot, Update(update_id=1, channel_post=post))
     assert g.tg.requests == []
 
@@ -256,7 +256,7 @@ async def test_tester_cannot_use_admin_even_if_telegram_chat_admin(hp, pool, dat
 @pytest.mark.db
 async def test_tester_can_register_normally(hp, pool):
     await hp.press(TESTER, "tester0001", "reg:solo")
-    await hp.press(TESTER, "tester0001", "reg:role:MID")
+    await hp.pick_solo_role(TESTER, "tester0001", "MID")
     await hp.press(TESTER, "tester0001", "reg:confirm")
     assert (await counts(pool))[3] == 1
 
@@ -276,7 +276,7 @@ async def test_blocked_user_cannot_finish_a_flow_started_before_removal(pool):
     """Allowed at first, then the allowlist no longer contains them: the very next update is refused."""
     first = Harness(pool, access_mode="private", allowed=[TESTER, STRANGER])
     await first.press(STRANGER, "stranger1", "reg:solo")
-    await first.press(STRANGER, "stranger1", "reg:role:EXP")
+    await first.pick_solo_role(STRANGER, "stranger1", "EXP")
     key = StorageKey(bot_id=first.bot.id, chat_id=STRANGER, user_id=STRANGER)
     state, data = await first.dp.storage.get_state(key), await first.dp.storage.get_data(key)
     first.close()
@@ -332,7 +332,7 @@ async def test_stranger_with_a_real_invite_cannot_join_in_private_mode(hp, pool)
         token = await c.fetchval("SELECT invite_token FROM teams WHERE id = $1", tid)
     hp.clear()
     await hp.say(STRANGER, "stranger1", f"/start team_{token}")
-    await hp.press(STRANGER, "stranger1", f"join:ok:{token}")
+    await hp.join(STRANGER, "stranger1", token)
     assert hp.texts() == [DENIED_TEXT] and hp.answers()[-1].text == DENIED_ALERT
     async with pool.acquire() as c:
         assert await c.fetchval("SELECT count(*) FROM team_members") == 2
@@ -347,7 +347,7 @@ async def test_allowed_tester_can_join_by_invite_in_private_mode(hp, pool):
     hp.clear()
     await hp.say(TESTER, "tester0001", f"/start team_{token}")
     assert "Приглашение в команду" in hp.last()
-    await hp.press(TESTER, "tester0001", f"join:ok:{token}")
+    await hp.join(TESTER, "tester0001", token)
     assert "Вы вступили в команду" in " ".join(hp.texts())
     async with pool.acquire() as c:
         assert await c.fetchval("SELECT count(*) FROM team_members WHERE user_id = $1", TESTER) == 1
@@ -358,7 +358,7 @@ async def test_tester_who_joined_is_not_admin_of_the_team_or_bot(hp, pool):
     tid = await make_team(pool, 1, size=2)
     async with pool.acquire() as c:
         token = await c.fetchval("SELECT invite_token FROM teams WHERE id = $1", tid)
-    await hp.press(TESTER, "tester0001", f"join:ok:{token}")
+    await hp.join(TESTER, "tester0001", token)
     hp.clear()
     victim = 11
     await hp.press(TESTER, "tester0001", f"team:rmok:{victim}")
@@ -392,7 +392,7 @@ async def test_stranger_with_real_captain_and_player_links_is_denied_in_private_
     for payload in (f"captain_{v.captain_invite_token}", f"team_{v.invite_token}"):
         await hp.say(STRANGER, "stranger1", f"/start {payload}")
     await hp.press(STRANGER, "stranger1", f"cap:ok:{v.captain_invite_token}")
-    await hp.press(STRANGER, "stranger1", f"join:ok:{v.invite_token}")
+    await hp.join(STRANGER, "stranger1", v.invite_token)
     assert hp.texts() == [DENIED_TEXT, DENIED_TEXT] and all(a.text == DENIED_ALERT for a in hp.answers())
     async with pool.acquire() as c:
         assert await c.fetchval("SELECT count(*) FROM team_members") == 0

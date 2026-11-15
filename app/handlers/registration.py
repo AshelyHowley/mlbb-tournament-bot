@@ -443,3 +443,4 @@ async def _finalize(cb: CallbackQuery, state: FSMContext, svc: Services) -> None
 async def reg_confirm(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
     await cb.answer()
     await _finalize(cb, state, svc)
+

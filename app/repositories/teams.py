@@ -18,7 +18,7 @@ async def lock_user(conn, user_id: int) -> None:
 
 
 async def insert_team(
-    conn, name: str, name_norm: str, created_by: int, captain_id: Optional[int], token: str, captain_token: Optional[str], stars: int = 0
+    conn, name: str, name_norm: str, created_by: int, captain_id: Optional[int], token: str, captain_token: Optional[str], stars: int = 0, creator_position: str = None
 ) -> int:
     # Ensure active tournament exists
     tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active' LIMIT 1")
@@ -26,16 +26,16 @@ async def insert_team(
         await conn.execute("INSERT INTO tournaments (status) VALUES ('active')")
         tid = await conn.fetchval("SELECT id FROM tournaments WHERE status = 'active' LIMIT 1")
     return await conn.fetchval(
-        "INSERT INTO teams (name, name_norm, created_by, captain_id, invite_token, captain_invite_token, tournament_id, stars) "
-        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
-        name, name_norm, created_by, captain_id, token, captain_token, tid, stars,
+        "INSERT INTO teams (name, name_norm, created_by, captain_id, invite_token, captain_invite_token, tournament_id, stars, creator_position) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
+        name, name_norm, created_by, captain_id, token, captain_token, tid, stars, creator_position,
     )
 
 
-async def add_member(conn, team_id: int, user_id: int, is_captain: bool = False, is_substitute: bool = False) -> None:
+async def add_member(conn, team_id: int, user_id: int, is_captain: bool = False, is_substitute: bool = False, rank: int = 0) -> None:
     await conn.execute(
-        "INSERT INTO team_members (team_id, user_id, is_captain, is_substitute) VALUES ($1,$2,$3,$4)",
-        team_id, user_id, is_captain, 1 if is_substitute else 0,
+        "INSERT INTO team_members (team_id, user_id, is_captain, is_substitute, rank) VALUES ($1,$2,$3,$4,$5)",
+        team_id, user_id, is_captain, 1 if is_substitute else 0, rank,
     )
 
 
@@ -91,7 +91,7 @@ async def members(conn, team_id: int) -> list[dict]:
     """Display name/username: the frozen snapshot once archived, otherwise the live `users` row."""
     return await conn.fetch(
         """
-        SELECT m.user_id, m.is_captain, m.is_substitute, m.joined_at,
+        SELECT m.user_id, m.is_captain, m.is_substitute, m.joined_at, m.rank,
                COALESCE(m.display_username, u.username) AS username,
                COALESCE(m.display_full_name, u.full_name) AS full_name
           FROM team_members m JOIN users u ON u.telegram_id = m.user_id
@@ -133,11 +133,13 @@ async def flag_member_captain(conn, team_id: int, user_id: int, value: bool) -> 
 
 async def swap_captain(conn, team_id: int, old_id: int, new_id: int) -> bool:
     """Old captain -> ordinary member, member -> captain. Roster size does not change. Team row must be locked."""
-    ok = await flag_member_captain(conn, team_id, old_id, False)
-    ok = ok and await flag_member_captain(conn, team_id, new_id, True)
-    ok = ok and (
+    # order matters for the DB triggers: teams.captain_id first (new captain is already a member),
+    # then drop the old flag before raising the new one (one captain row per team)
+    ok = (
         await conn.execute("UPDATE teams SET captain_id = $3 WHERE id = $1 AND captain_id = $2", team_id, old_id, new_id)
     ) == "UPDATE 1"
+    ok = ok and await flag_member_captain(conn, team_id, old_id, False)
+    ok = ok and await flag_member_captain(conn, team_id, new_id, True)
     return ok
 
 

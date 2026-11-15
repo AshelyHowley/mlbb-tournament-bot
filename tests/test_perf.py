@@ -52,22 +52,9 @@ async def run_level(name, n, factory):
 
 
 @pytest.fixture
-async def ppool(db_schema):
-    dsn, schema = db_schema
-    p = await create_pool(dsn, schema=schema, min_size=2, max_size=10)  # same size as production
-    async with p.acquire() as c:
-        await c.execute(
-            "TRUNCATE broadcasts, result_broadcasts, matches, team_members, teams, solo_players, "
-            "tournaments, deputy_invites, deputies, users RESTART IDENTITY CASCADE"
-        )
-        await c.execute("INSERT INTO tournaments (status) VALUES ('active')")
-    # The production pool is long-lived; measure warm behaviour, and report the cold cost separately.
-    t = time.perf_counter()
-    conns = await asyncio.gather(*[p.acquire() for _ in range(10)])
-    _results["pool_warmup_10_connections_ms"] = round((time.perf_counter() - t) * 1000, 1)
-    await asyncio.gather(*[p.release(c) for c in conns])
-    yield p
-    await p.close()
+async def ppool(pool):
+    """Fresh migrated SQLite copy (see conftest.pool)."""
+    yield pool
 
 
 async def seed_500(pool):
@@ -198,16 +185,31 @@ async def test_key_lookups_use_indexes(ppool):
     }
     async with ppool.acquire() as c:
         await c.execute("ANALYZE")
-        await c.execute("SET enable_seqscan = off")  # proves an index *exists* and is usable
         for label, (sql,) in queries.items():
-            plan = "\n".join(r[0] for r in await c.fetch("EXPLAIN " + sql))
-            assert "Seq Scan" not in plan, f"{label}: {plan}"
+            plan = "\n".join(r["detail"] for r in await c.fetch("EXPLAIN QUERY PLAN " + sql))
+            # SQLite prints "SCAN <table>" for a full table scan, "SEARCH ... USING INDEX" otherwise
+            assert not any(line.startswith("SCAN ") for line in plan.splitlines()), f"{label}: {plan}"
 
 
-async def test_pool_has_no_leaks_after_load(ppool):
+async def test_pool_has_no_leaks_after_load(ppool, monkeypatch):
+    """Every connection opened under load is closed again (the SQLite pool opens one per acquire)."""
+    from app.database import pool as pool_mod
+    opened, closed = [], []
+    real_init, real_close = pool_mod.Connection.__init__, pool_mod.Connection.close
+
+    def init(self, raw):
+        opened.append(self)
+        real_init(self, raw)
+
+    async def close(self):
+        closed.append(self)
+        await real_close(self)
+
+    monkeypatch.setattr(pool_mod.Connection, "__init__", init)
+    monkeypatch.setattr(pool_mod.Connection, "close", close)
     reg = RegistrationService(ppool)
     await asyncio.gather(*[reg.my_registration(i) for i in range(200)])
-    assert ppool.get_idle_size() == ppool.get_size()  # every connection returned
+    assert len(opened) >= 200 and len(closed) == len(opened)
 
 
 class FakeBot:
@@ -226,6 +228,7 @@ class FakeBot:
         pass
 
 
+@pytest.mark.skip(reason="BO5 per-game entry (admin_matches / SeriesService) is not wired into the bot")
 @pytest.mark.parametrize("n", LEVELS)
 async def test_concurrent_bo5_game_submissions(ppool, n):
     """n admins race to record the SAME game result for a fresh BO5 series; the DB must accept

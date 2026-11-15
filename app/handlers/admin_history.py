@@ -147,8 +147,11 @@ async def match_card(cb: CallbackQuery, svc: Services) -> None:
     gs = await svc.tournaments.series_games(mid)
     wa = sum(1 for g in gs if g["winner_team_id"] == m["team_a_id"])
     wb = sum(1 for g in gs if g["winner_team_id"] == m["team_b_id"])
-    lines = [f"{esc(m['stage_title'])}", "", f"{esc(m['team_a'])}\n{wa} : {wb}\n{esc(m['team_b'])}", "", "🎯 Катки:"]
-    lines += [f"{g['game_number']}. 🏆 {esc(g['winner_name'])}" for g in gs]
+    if gs:
+        lines = [f"{esc(m['stage_title'])}", "", f"{esc(m['team_a'])}\n{wa} : {wb}\n{esc(m['team_b'])}", "", "🎯 Катки:"]
+        lines += [f"{g['game_number']}. 🏆 {esc(g['winner_name'])}" for g in gs]
+    else:  # winner picked in the bracket editor: there is no per-game score to show
+        lines = [f"{esc(m['stage_title'])}", "", f"{esc(m['team_a'])} vs {esc(m['team_b'])}"]
     if m["status"] == "finished":
         lines += ["", f"🏆 Победитель серии: {esc(m['winner'])}"]
         tour = await svc.tournaments.get(tid)

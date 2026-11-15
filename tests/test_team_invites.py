@@ -1,7 +1,7 @@
 """Invite-link team mechanics: create -> join by secret token -> manage roster. Identity = Telegram user_id."""
 import asyncio
 
-# import asyncpg  # removed for SQLite
+from tests.sqlite_compat import asyncpg
 import pytest
 
 from app.services.errors import (

@@ -9,6 +9,7 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.context import Services
@@ -33,6 +34,9 @@ from app.utils.text import esc, parse_captain_payload, parse_deputy_payload, par
 
 log = logging.getLogger(__name__)
 router = Router(name="team")
+
+class JoinRank(StatesGroup):
+    rank = State()
 
 _TOKEN = r"[A-Za-z0-9_-]{32,48}"
 SOLO_MSG = "ℹ️ Вы зарегистрированы как соло-игрок — вступить в команду нельзя."
@@ -158,11 +162,10 @@ async def deputy_accept(cb: CallbackQuery, svc: Services) -> None:
 
 
 @router.callback_query(F.data.regexp(rf"^join:ok:{_TOKEN}$"))
-async def join_confirm(cb: CallbackQuery, svc: Services) -> None:
+async def join_confirm(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
     await cb.answer()
     token = cb.data.split(":", 2)[2]
     user = tg_user(cb)
-    # cheap read-only checks first (no Telegram API call for hopeless cases)
     peek = await svc.team.peek_invite(user.id, token)
     blocked = _player_status_message(peek)
     if blocked:
@@ -173,25 +176,67 @@ async def join_confirm(cb: CallbackQuery, svc: Services) -> None:
         from app.handlers.registration import sub_message
         await show(cb, sub_message(res), ckb.subscribe(svc.cfg, retry_cb=cb.data, cancel_cb="menu"))
         return
-    try:
-        result = await svc.team.join_team(user, token)  # authoritative: row lock + DB triggers
-    except ServiceError as e:
-        await show(cb, e.user_message, ckb.back_to_menu())
+    # Ask for rank before joining; a player known from the archive can reuse the previous one in one tap
+    await state.update_data(join_token=token)
+    await state.set_state(JoinRank.rank)
+    arch = await svc.archive.get(user.id)
+    markup = ckb.nav()
+    if arch is not None and arch.stars is not None and 0 <= arch.stars <= 50000:
+        await state.update_data(arch_stars=arch.stars)
+        markup = ckb.keep_value(f"✅ Оставить прежний: {arch.stars} ⭐", "join:keeprank", back=False)
+    await show(cb, "⭐ Укажите ваш максимальный ранг (число):", markup)
+
+
+@router.callback_query(JoinRank.rank, F.data == "join:keeprank")
+async def join_keep_rank(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
+    await cb.answer()
+    stars = (await state.get_data()).get("arch_stars")
+    if stars is None:
         return
+    await _do_join(cb, state, svc, stars)
+
+
+@router.message(JoinRank.rank)
+async def join_rank(message: Message, state: FSMContext, svc: Services) -> None:
+    text = (message.text or "").strip()
+    if not text.isdigit() or not (0 <= int(text) <= 50000):
+        await message.answer("Введите число от 0 до 50000")
+        return
+    await _do_join(message, state, svc, int(text))
+
+
+async def _do_join(event, state: FSMContext, svc: Services, rank: int) -> None:
+    text = str(rank)
+    data = await state.get_data()
+    token = data.get("join_token")
+    if not token:
+        await show(event, "Ошибка. Попробуйте вступить заново.", ckb.back_to_menu())
+        await state.clear()
+        return
+    user = tg_user(event)
+    try:
+        result = await svc.team.join_team(user, token, rank=rank)
+    except ServiceError as e:
+        await show(event, e.user_message, ckb.back_to_menu())
+        await state.clear()
+        return
+    await state.clear()
     v = result.team
     if result.already_member:
-        await show(cb, "✅ Вы уже состоите в этой команде.", tkb.my_team_only())
+        await show(event, "✅ Вы уже состоите в этой команде.", tkb.my_team_only())
         return
+    await svc.archive.save(user.id, user.username, user.full_name, kind="member", stars=rank, team_name=v.name)
     await show(
-        cb,
-        f"✅ <b>Вы вступили в команду!</b>\n\n🏆 <b>{esc(v.name)}</b>\n👥 Участников: {v.size}/{MAX_TEAM_SIZE}",
+        event,
+        f"✅ <b>Вы вступили в команду!</b>\n\n🏆 <b>{esc(v.name)}</b>\n👥 Участников: {v.size}/{MAX_TEAM_SIZE}\n⭐ Ваш ранг: <b>{text}</b>",
         tkb.my_team_only(),
     )
-    me = next(m for m in v.members if m.user_id == user.id)
-    await _notify(
-        svc, v.captain_id,
-        f"👤 <b>Новый участник команды</b>\n\n{me.display} присоединился к команде.\n\n👥 Состав: {v.size}/{MAX_TEAM_SIZE}",
-    )
+    me = next((m for m in v.members if m.user_id == user.id), None)
+    if me and v.captain_id:
+        await _notify(
+            svc, v.captain_id,
+            f"👤 <b>Новый участник команды</b>\n\n{me.display} присоединился к команде (ранг: {text}).\n\n👥 Состав: {v.size}/{MAX_TEAM_SIZE}",
+        )
 
 
 @router.callback_query(F.data.regexp(rf"^cap:ok:{_TOKEN}$"))

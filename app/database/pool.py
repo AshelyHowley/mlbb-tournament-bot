@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sqlite3
 from contextlib import asynccontextmanager
 from typing import Any, Optional, Sequence
 
@@ -27,6 +28,47 @@ def _convert_placeholders(sql: str, args: tuple) -> tuple[str, tuple]:
     return new_sql, new_args
 
 
+# '<sqlstate>:<constraint>: text' raised by our triggers (migration 019)
+_TRIGGER_ERR = re.compile(r"^(MB\d{3}|\d{5}):([a-z0-9_]+):")
+# native UNIQUE failures name columns, not constraints: map them to the PostgreSQL-era names
+_UNIQUE_COLUMNS = {
+    "teams.name_norm, teams.tournament_id": "teams_name_norm_uq",
+    "solo_players.user_id": "solo_players_pkey",
+    "team_members.team_id, team_members.user_id": "team_members_team_user_uq",
+    # partial unique indexes from migration 019 are reported by column too
+    "team_members.team_id": "team_members_one_captain_uq",
+    "teams.captain_id, teams.tournament_id": "teams_captain_uq",
+    "teams.invite_token": "teams_invite_token_uq",
+    "teams.captain_invite_token": "teams_captain_invite_token_uq",
+    "matches.tournament_id, matches.stage_code": "matches_one_per_stage_uq",
+}
+_NATIVE_STATES = (
+    ("UNIQUE constraint failed", "23505"),
+    ("CHECK constraint failed", "23514"),
+    ("FOREIGN KEY constraint failed", "23503"),
+    ("NOT NULL constraint failed", "23502"),
+)
+
+
+def _annotate(e: sqlite3.DatabaseError) -> None:
+    """Give a sqlite3 error the sqlstate / constraint_name attributes the services expect (as asyncpg had)."""
+    msg = str(e)
+    m = _TRIGGER_ERR.match(msg)
+    if m:
+        e.sqlstate, e.constraint_name = m.group(1), m.group(2)
+        return
+    e.sqlstate, e.constraint_name = None, None
+    for prefix, state in _NATIVE_STATES:
+        if msg.startswith(prefix):
+            e.sqlstate = state
+            detail = msg[len(prefix):].lstrip(": ")
+            if detail.startswith("index '"):
+                e.constraint_name = detail[len("index '"):].rstrip("'")
+            else:
+                e.constraint_name = _UNIQUE_COLUMNS.get(detail)
+            return
+
+
 class Record(dict):
     """dict that also supports attribute and index access like dict."""
 
@@ -41,13 +83,18 @@ class Connection:
         self._conn = conn
         self._conn.row_factory = aiosqlite.Row
         self._in_tx = False
+        self._sp = 0
 
     async def execute(self, sql: str, *args: Any) -> str:
         sql, args = _convert_placeholders(sql, args)
-        cur = await self._conn.execute(sql, args)
-        # Commit only if not inside an explicit transaction we started
-        if not self._in_tx:
-            await self._conn.commit()
+        try:
+            cur = await self._conn.execute(sql, args)
+            # Commit only if not inside an explicit transaction we started
+            if not self._in_tx:
+                await self._conn.commit()
+        except sqlite3.DatabaseError as e:
+            await self._failed(e)
+            raise
         # Mimic asyncpg status strings roughly
         if sql.strip().upper().startswith("INSERT"):
             return f"INSERT 0 {cur.lastrowid or 0}"
@@ -59,9 +106,23 @@ class Connection:
 
     async def fetch(self, sql: str, *args: Any) -> list[Record]:
         sql, args = _convert_placeholders(sql, args)
-        cur = await self._conn.execute(sql, args)
-        rows = await cur.fetchall()
+        try:
+            cur = await self._conn.execute(sql, args)
+            rows = await cur.fetchall()
+            # INSERT/UPDATE ... RETURNING goes through fetch*: without this commit it was rolled back on close
+            if not self._in_tx and self._conn.in_transaction:
+                await self._conn.commit()
+        except sqlite3.DatabaseError as e:
+            await self._failed(e)
+            raise
         return [Record(dict(r)) for r in rows]
+
+    async def _failed(self, e: sqlite3.DatabaseError) -> None:
+        _annotate(e)
+        # outside transaction() a failed write must not leave sqlite3's implicit transaction open,
+        # or the next transaction() on this connection fails with "cannot start a transaction"
+        if not self._in_tx and self._conn.in_transaction:
+            await self._conn.rollback()
 
     async def fetchrow(self, sql: str, *args: Any) -> Optional[Record]:
         rows = await self.fetch(sql, *args)
@@ -75,12 +136,25 @@ class Connection:
 
     @asynccontextmanager
     async def transaction(self):
+        if self._in_tx:
+            # nested transaction() = SAVEPOINT, like asyncpg: an inner failure rolls back only the inner part
+            self._sp += 1
+            name = f"sp_{self._sp}"
+            await self._conn.execute(f"SAVEPOINT {name}")
+            try:
+                yield self
+                await self._conn.execute(f"RELEASE {name}")
+            except BaseException:
+                await self._conn.execute(f"ROLLBACK TO {name}")
+                await self._conn.execute(f"RELEASE {name}")
+                raise
+            return
         self._in_tx = True
-        await self._conn.execute("BEGIN")
+        await self._conn.execute("BEGIN IMMEDIATE")  # take the write lock up front: no deadlock on lock upgrade
         try:
             yield self
             await self._conn.commit()
-        except Exception:
+        except BaseException:
             await self._conn.rollback()
             raise
         finally:
@@ -101,7 +175,7 @@ class _AcquireContext:
         return self._acquire().__await__()
 
     async def _acquire(self) -> Connection:
-        raw = await aiosqlite.connect(self.pool.path)
+        raw = await aiosqlite.connect(self.pool.path, timeout=30)  # wait for a busy writer instead of failing
         await raw.execute("PRAGMA foreign_keys = ON")
         await raw.execute("PRAGMA journal_mode = WAL")
         self.conn = Connection(raw)
@@ -126,6 +200,23 @@ class Pool:
 
     def acquire(self) -> _AcquireContext:
         return _AcquireContext(self)
+
+    # one-shot helpers like asyncpg.Pool: each call runs on its own short-lived connection
+    async def execute(self, sql: str, *args: Any) -> str:
+        async with self.acquire() as conn:
+            return await conn.execute(sql, *args)
+
+    async def fetch(self, sql: str, *args: Any) -> list[Record]:
+        async with self.acquire() as conn:
+            return await conn.fetch(sql, *args)
+
+    async def fetchrow(self, sql: str, *args: Any) -> Optional[Record]:
+        async with self.acquire() as conn:
+            return await conn.fetchrow(sql, *args)
+
+    async def fetchval(self, sql: str, *args: Any) -> Any:
+        async with self.acquire() as conn:
+            return await conn.fetchval(sql, *args)
 
     async def close(self) -> None:
         pass  # connections are closed by the caller

@@ -44,8 +44,8 @@ class AdminService:
                     team_id,
                 )
                 await conn.execute("DELETE FROM matches WHERE team_a_id = $1 OR team_b_id = $1 OR winner_id = $1", team_id)
-                await conn.execute("DELETE FROM team_members WHERE team_id = $1", team_id)
-                await conn.execute("DELETE FROM teams WHERE id = $1", team_id)
+                if await conn.execute("DELETE FROM teams WHERE id = $1", team_id) != "DELETE 1":  # members cascade
+                    raise NotFound("Команда")
 
     async def all_teams(self):
         async with self.pool.acquire() as conn:
@@ -87,21 +87,18 @@ class AdminService:
                     raise ValidationError("❌ Неизвестный этап.")
                 return await matches_repo.create(conn, stage, team_a, team_b)
         except sqlite3.IntegrityError as e:
-            if str(e) == "matches_one_final_uq":
-                raise Conflict("ℹ️ Финал этого турнира уже создан.")
-            if str(e) == "matches_one_third_uq":
-                raise Conflict("ℹ️ Матч за 3-е место этого турнира уже создан.")
-            raise Conflict("ℹ️ Такой матч на этом этапе уже создан.")
-        except Exception:
-            raise NotFound("Команда")
-        except Exception:
-            raise ValidationError("❌ Некорректные участники матча.")
-        except sqlite3.IntegrityError as e:
-            if e.sqlstate == "MB005":
+            name, state = getattr(e, "constraint_name", None), getattr(e, "sqlstate", None)
+            if state == "MB005":
                 raise TeamNotEligible()
-            if e.sqlstate == "MB012":
+            if name == "matches_one_per_stage_uq":
+                if stage == "third":
+                    raise Conflict("ℹ️ Матч за 3-е место этого турнира уже создан.")
+                raise Conflict("ℹ️ Финал этого турнира уже создан.")
+            if name == "matches_distinct_teams":
+                raise ValidationError("❌ Команда не может играть сама с собой.")
+            if state == "23503":
                 raise NotFound("Команда")
-            raise
+            raise Conflict("ℹ️ Такой матч на этом этапе уже создан.")
 
     async def match(self, match_id: int):
         async with self.pool.acquire() as conn:

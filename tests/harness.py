@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import tempfile
+from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
@@ -42,9 +44,11 @@ from app.handlers import (
     admin_panel,
     fallback,
     registration,
+    reviews,
     start,
     team,
 )
+from app.services.player_archive import PlayerArchive
 
 TOKEN = "123456789:" + "A" * 35
 ADMIN_ID = 999
@@ -81,7 +85,7 @@ class FakeTelegram(BaseSession):
             cid = method.chat_id if isinstance(method.chat_id, int) else 1
             if cid in self.fail_send:
                 raise self.fail_send[cid]
-            return Message(message_id=self._n, date=datetime.datetime('now'), chat=Chat(id=cid, type="private"),
+            return Message(message_id=self._n, date=datetime.now(), chat=Chat(id=cid, type="private"),
                            text=getattr(method, "text", None), caption=getattr(method, "caption", None))
         if isinstance(method, GetChatMember):
             st = self.chat_state.get(method.chat_id, "member")
@@ -108,7 +112,9 @@ class Harness:
         self.bot = Bot(TOKEN, session=self.tg)
         self.svc = build_services(self.cfg, pool, self.bot)
         self.svc.bc.interval = 0
-        for r in (start, team, admin_panel, admin_matches, admin_notify, admin_deputies, admin_history, admin_broadcast, registration, fallback):
+        # never touch the real player_archive.db from tests
+        self.svc.archive = PlayerArchive(str(Path(tempfile.mkdtemp()) / "player_archive.db"))
+        for r in (reviews, start, team, admin_panel, admin_matches, admin_notify, admin_deputies, admin_history, admin_broadcast, registration, fallback):
             r.router._parent_router = None  # module-level routers are reused across per-test dispatchers
         self.dp = build_dispatcher(self.svc, pool)
         self._uid = 0
@@ -127,7 +133,7 @@ class Harness:
         ents = None
         if text and text.startswith("/"):
             ents = [MessageEntity(type="bot_command", offset=0, length=len(text.split()[0]))]
-        return Message(message_id=self._uid, date=datetime.datetime('now'), chat=Chat(id=uid, type=chat_type),
+        return Message(message_id=self._uid, date=datetime.now(), chat=Chat(id=uid, type=chat_type),
                        from_user=self._user(uid, username), text=text, entities=ents, **kw)
 
     async def say(self, uid: int, username: Optional[str], text: str, chat_type: str = "private") -> None:
@@ -153,6 +159,31 @@ class Harness:
         cq = CallbackQuery(id=str(self._uid), from_user=self._user(uid, username), chat_instance="ci", data=data,
                            message=self._msg(uid, username, "old"))
         await self.dp.feed_update(self.bot, Update(update_id=self._uid, callback_query=cq))
+
+    # -- multi-step flows (the bot asks for rank / position / stars after the button press)
+    async def _answer_prompt(self, uid: int, username: Optional[str]) -> None:
+        last = self.last()
+        if "максимальный ранг" in last:
+            await self.say(uid, username, "100")
+        elif "должность" in last:
+            await self.say(uid, username, "Менеджер")
+
+    async def pick_team_role(self, uid: int, username: Optional[str], role: str) -> None:
+        """reg:trole:<role>, then the rank (captain/member) or position (registrar) the bot asks for."""
+        await self.press(uid, username, f"reg:trole:{role}")
+        await self._answer_prompt(uid, username)
+
+    async def join(self, uid: int, username: Optional[str], token: str) -> None:
+        """join:ok:<token>, then the rank prompt if the bot let the user through to it."""
+        await self.press(uid, username, f"join:ok:{token}")
+        await self._answer_prompt(uid, username)
+
+    async def pick_solo_role(self, uid: int, username: Optional[str], role: str) -> None:
+        """Solo: toggle one role, press "done", then enter stars."""
+        await self.press(uid, username, f"reg:role:{role}")
+        await self.press(uid, username, "reg:role:done")
+        if "звёзд" in self.last():
+            await self.say(uid, username, "1000")
 
     # -- outputs
     def clear(self):

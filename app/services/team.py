@@ -39,7 +39,7 @@ MAX_TEAM_SIZE = 5  # captain included; a registrar who does not play is NOT coun
 CREATOR_ROLES = ("captain", "member", "registrar")
 _TOKEN_RETRIES = 3
 
-# sqlstates raised by our own triggers (see migrations 002/003)
+# sqlstates raised by our own triggers (see migration 019)
 _SOLO_CONFLICT, _TEAM_FULL = "MB001", "MB003"
 
 
@@ -49,6 +49,7 @@ class Member:
     username: Optional[str]
     full_name: str
     is_captain: bool
+    rank: int = 0
 
     @property
     def display(self) -> str:
@@ -67,6 +68,8 @@ class TeamView:
     creator_username: Optional[str]
     created_at: datetime
     members: tuple[Member, ...]
+    creator_position: Optional[str] = None
+    total_rank: int = 0
 
     @property
     def size(self) -> int:
@@ -125,16 +128,19 @@ async def _view(conn, team_row) -> TeamView:
         team_id=team_row["id"], name=team_row["name"], invite_token=team_row["invite_token"],
         captain_invite_token=team_row["captain_invite_token"], captain_id=team_row["captain_id"],
         created_by=team_row["created_by"], creator_name=team_row["creator_name"] or "",
-        creator_username=team_row["creator_username"], created_at=team_row["created_at"],
-        members=tuple(Member(r["user_id"], r["username"], r["full_name"] or "", r["is_captain"]) for r in rows),
+        creator_username=team_row["creator_username"], creator_position=team_row.get("creator_position"),
+        created_at=team_row["created_at"],
+        members=tuple(Member(r["user_id"], r["username"], r["full_name"] or "", r["is_captain"], r.get("rank") or 0) for r in rows),
+        total_rank=sum(r.get("rank") or 0 for r in rows),
     )
 
 
-def _map_pg(e: asyncpg.PostgresError) -> None:
+def _map_pg(e: Exception) -> None:
     """Translate our trigger errors into domain errors (raises), otherwise return."""
-    if e.sqlstate == _TEAM_FULL:
+    state = getattr(e, "sqlstate", None)
+    if state == _TEAM_FULL:
         raise TeamFull()
-    if e.sqlstate == _SOLO_CONFLICT:
+    if state == _SOLO_CONFLICT:
         raise AlreadyRegistered("ℹ️ Вы зарегистрированы как соло-игрок — вступить в команду нельзя.")
 
 
@@ -203,7 +209,7 @@ class TeamService:
             return InvitePeek("full" if view.size >= MAX_TEAM_SIZE else "ok", view)
 
     # ---- create -----------------------------------------------------------------------------
-    async def create_team(self, user: TgUser, name_raw: str, role: str = "captain", *, is_admin: bool = False) -> TeamView:
+    async def create_team(self, user: TgUser, name_raw: str, role: str = "captain", rank: int = 0, position: str = None, *, is_admin: bool = False) -> TeamView:
         """role: 'captain' (creator captains and plays), 'member' (creator plays, captain comes later),
         'registrar' (creator only registers, does not play). An ordinary user may register one team; the admin any number."""
         if role not in CREATOR_ROLES:
@@ -234,26 +240,25 @@ class TeamService:
                         team_id = await teams_repo.insert_team(
                             conn, name, name_norm, user.id, user.id if is_captain else None,
                             new_invite_token(), None if is_captain else new_invite_token(),
+                            creator_position=position,
                         )
                         if role != "registrar":
-                            await teams_repo.add_member(conn, team_id, user.id, is_captain=is_captain)
+                            await teams_repo.add_member(conn, team_id, user.id, is_captain=is_captain, rank=rank)
                         await log_registration(conn, user.id, 'create_team', name, f'role={role}')
                         await log_action(conn, user.id, user.username, 'create_team', name)
                         return await _view(conn, await teams_repo.get(conn, team_id))
             except sqlite3.IntegrityError as e:
-                c = str(e) or ""
+                c = getattr(e, "constraint_name", None) or ""
                 if c in ("teams_invite_token_uq", "teams_captain_invite_token_uq") and attempt < _TOKEN_RETRIES - 1:
                     continue  # astronomically unlikely token collision: draw new ones
                 if c == "teams_name_norm_uq":
                     raise TeamNameTaken()
-                raise AlreadyRegistered("ℹ️ Вы уже зарегистрированы.")
-            except sqlite3.IntegrityError as e:
                 _map_pg(e)
-                raise
+                raise AlreadyRegistered("ℹ️ Вы уже зарегистрированы.")
         raise Conflict("⚠️ Сервер занят, повторите попытку.")  # pragma: no cover
 
     # ---- join as a player -------------------------------------------------------------------
-    async def join_team(self, user: TgUser, token: str) -> JoinResult:
+    async def join_team(self, user: TgUser, token: str, rank: int = 0) -> JoinResult:
         if not INVITE_TOKEN_RE.fullmatch(token or ""):
             raise InvalidInvite()
         try:
@@ -278,13 +283,11 @@ class TeamService:
                         raise RegistrationClosed()
                     if await teams_repo.member_count(conn, team["id"]) >= MAX_TEAM_SIZE:
                         raise TeamFull()
-                    await teams_repo.add_member(conn, team["id"], user.id)
+                    await teams_repo.add_member(conn, team["id"], user.id, rank=rank)
                 return JoinResult(await _view(conn, team), already_member=False)
-        except sqlite3.IntegrityError:
-            raise AlreadyInOtherTeam()
         except sqlite3.IntegrityError as e:
             _map_pg(e)
-            raise
+            raise AlreadyInOtherTeam()
 
     # ---- captain invite ---------------------------------------------------------------------
     async def accept_captain(self, user: TgUser, token: str) -> CaptainResult:
@@ -318,15 +321,14 @@ class TeamService:
                             raise RegistrationClosed()
                         if await teams_repo.member_count(conn, team["id"]) >= MAX_TEAM_SIZE:
                             raise TeamFull()
+                        await teams_repo.add_member(conn, team["id"], user.id)
                         await teams_repo.assign_captain(conn, team["id"], user.id)
-                        await teams_repo.add_member(conn, team["id"], user.id, is_captain=True)
+                        await teams_repo.flag_member_captain(conn, team["id"], user.id, True)
                 fresh = await teams_repo.get(conn, team["id"])  # re-read: captain_id changed inside the tx
                 return CaptainResult(await _view(conn, fresh), already_captain=False, was_member=was_member)
-        except sqlite3.IntegrityError:
-            raise AlreadyInOtherTeam()
         except sqlite3.IntegrityError as e:
             _map_pg(e)
-            raise
+            raise AlreadyInOtherTeam()
 
     async def regenerate_captain_token(self, registrar_id: int) -> TeamView:
         """Registrar replaces the captain link while no captain is assigned; the old link dies immediately."""

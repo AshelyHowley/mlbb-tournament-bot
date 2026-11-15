@@ -37,6 +37,8 @@ async def run() -> int:
     try:
         applied = await migrate(pool)
         log.info("Migrations applied: %s", applied or "none")
+        imported = await svc.archive.import_from_db(pool)
+        log.info("Player archive: %s (%d new from DB, %d total)", svc.archive.path, imported, await svc.archive.count())
         stale = await svc.bc.recover()
         if stale:
             log.warning("%d interrupted broadcast(s) marked as 'interrupted'", stale)

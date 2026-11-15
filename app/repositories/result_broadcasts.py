@@ -116,7 +116,12 @@ async def recipients(conn, kind: str, context_id: int) -> list[int]:
         candidate_ids = all_ids
     if not candidate_ids:
         return []
-    return [r["telegram_id"] for r in await conn.fetch(
-        "SELECT telegram_id FROM users WHERE telegram_id = ANY($1::bigint[]) AND NOT is_blocked ORDER BY telegram_id",
-        list(candidate_ids),
-    )]
+    ids = sorted(int(i) for i in candidate_ids)
+    out: list[int] = []
+    for k in range(0, len(ids), 500):  # stay well below SQLite's bound-parameter limit
+        chunk = ids[k:k + 500]
+        marks = ",".join(f"${j + 1}" for j in range(len(chunk)))
+        out += [r["telegram_id"] for r in await conn.fetch(
+            f"SELECT telegram_id FROM users WHERE telegram_id IN ({marks}) AND NOT is_blocked", *chunk,
+        )]
+    return sorted(out)

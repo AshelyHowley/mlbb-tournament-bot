@@ -42,3 +42,31 @@ async def team_token(pool, team_id: int) -> str:
 
 def dummy_method() -> SendMessage:
     return SendMessage(chat_id=1, text="x")
+
+
+async def set_winner(pool, match_id: int, winner_id: int) -> None:
+    """Decide a match exactly the way the bot does it (admin_panel `br:win`)."""
+    from app.services.bracket_progress import record_winner
+    async with pool.acquire() as c, c.transaction():
+        await record_winner(c, match_id, winner_id)
+
+
+async def ensure_third_place_stage(pool) -> None:
+    """No-op since migration 020 adds the 'third' stage; kept for older tests."""
+    async with pool.acquire() as c:
+        await c.execute("INSERT OR IGNORE INTO stages (code, title, sort_order) VALUES ('third', '3 место', 45)")
+
+
+async def ui_add_pair(h, actor_id: int, actor_uname: Optional[str], pool, a: int, b: int, stage: str) -> Optional[int]:
+    """Add a bracket pair through the bot's own buttons (Сетка -> pick, pick, stage). Returns the match id."""
+    await h.press(actor_id, actor_uname, f"br:pick:{a}")
+    await h.press(actor_id, actor_uname, f"br:pick:{b}")
+    await h.press(actor_id, actor_uname, f"br:stage:{stage}")
+    async with pool.acquire() as c:
+        return await c.fetchval(
+            "SELECT id FROM matches WHERE stage_code = $1 AND team_a_id = $2 AND team_b_id = $3", stage, a, b)
+
+
+async def ui_pick_winner(h, actor_id: int, actor_uname: Optional[str], match_id: int, winner: int) -> None:
+    """Decide a pair through the bracket editor button (br:win)."""
+    await h.press(actor_id, actor_uname, f"br:win:{match_id}:{winner}")

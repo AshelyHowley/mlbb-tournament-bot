@@ -16,6 +16,7 @@ from app.handlers import (
     admin_panel,
     fallback,
     registration,
+    reviews,
     start,
     team,
 )
@@ -24,6 +25,7 @@ from app.middlewares.core import UserTrackMiddleware
 from app.services.admin import AdminService
 from app.services.broadcast import BroadcastService
 from app.services.deputy import DeputyService
+from app.services.player_archive import PlayerArchive, archive_path_for
 from app.services.registration import RegistrationService
 from app.services.result_notify import ResultNotifyService
 from app.services.roles import RoleService
@@ -51,6 +53,7 @@ def build_services(cfg: Config, pool: object, bot: Bot) -> Services:
         deputies=DeputyService(pool),
         result_notify=ResultNotifyService(pool, bot),
         roles=RoleService(pool, cfg),
+        archive=PlayerArchive(archive_path_for(cfg.database_url)),
     )
 
 
@@ -65,7 +68,7 @@ def build_dispatcher(svc: Services, pool: object) -> Dispatcher:
     # order matters: deep-link /start (team) before plain /start & menu, admin routers gate themselves
     # (IsStaff, or IsAdmin for deputy management), fallback last
     for r in (
-        team.router, start.router, admin_panel.router, admin_notify.router,
+        team.router, start.router, reviews.router, admin_panel.router, admin_notify.router,
         admin_deputies.router, admin_history.router, admin_broadcast.router, registration.router, fallback.router,
     ):
         dp.include_router(r)

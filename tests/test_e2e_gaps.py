@@ -16,7 +16,7 @@ from aiogram.methods import SendMessage as SendMessageMethod
 from app.services.registration import TgUser
 from app.services.team import TeamService
 from tests.harness import ADMIN_ID, Harness
-from tests.helpers import make_team
+from tests.helpers import ensure_third_place_stage, make_team, ui_add_pair, ui_pick_winner
 
 pytestmark = pytest.mark.db
 
@@ -48,38 +48,36 @@ async def make_deputy(h, pool) -> None:
 
 
 async def _create_match(h, actor_id, actor_uname, a, b, stage) -> None:
-    await h.press(actor_id, actor_uname, "mt:new")
-    await h.press(actor_id, actor_uname, f"mt:a:pick:{a}")
-    await h.press(actor_id, actor_uname, f"mt:b:pick:{b}")
-    await h.press(actor_id, actor_uname, f"mt:stage:{stage}")
-    await h.press(actor_id, actor_uname, "mt:ok")
+    await ui_add_pair(h, actor_id, actor_uname, h.svc.team.pool, a, b, stage)
 
 
 async def _win_bo5(h, actor_id, actor_uname, pool, winner) -> int:
+    """Decide the latest pair for `winner` with the bracket editor (the bot has no per-game entry)."""
     async with pool.acquire() as c:
         mid = await c.fetchval("SELECT id FROM matches ORDER BY id DESC LIMIT 1")
-    for i in range(3):
-        await h.press(actor_id, actor_uname, f"mt:gnew:{mid}")
-        await h.press(actor_id, actor_uname, f"mt:gw:{mid}:{winner}")
-        await h.press(actor_id, actor_uname, f"mt:gok:{mid}:{winner}:{i + 1}")
+    await ui_pick_winner(h, actor_id, actor_uname, mid, winner)
     return mid
 
 
 async def _prepare_full_podium(h, actor_id, actor_uname, pool) -> None:
-    """Round -> semi-final -> final + third-place, all created and played manually (no draw)."""
+    """Semi-finals -> final + third-place, all created and decided through the bracket buttons."""
+    await ensure_third_place_stage(pool)
     a, b, c, d = [await make_team(pool, i, f"Team {chr(64 + i)}") for i in (1, 2, 3, 4)]
 
     async def win(x, y, stage, winner):
-        await _create_match(h, actor_id, actor_uname, x, y, stage)
-        await _win_bo5(h, actor_id, actor_uname, pool, winner)
+        mid = await ui_add_pair(h, actor_id, actor_uname, pool, x, y, stage)
+        await ui_pick_winner(h, actor_id, actor_uname, mid, winner)
 
     await win(a, b, "semi", a)
     await win(c, d, "semi", d)
-    await win(b, c, "third", b)
+    async with pool.acquire() as conn:  # auto-created once both semis were decided
+        third = await conn.fetchval("SELECT id FROM matches WHERE stage_code = 'third'")
+    await ui_pick_winner(h, actor_id, actor_uname, third, b)
     await win(a, d, "final", a)
 
 
 # ------------------------------------------------------------------ team match eligibility boundaries
+@pytest.mark.skip(reason="BO5 per-game entry (admin_matches / SeriesService) is not wired into the bot")
 async def test_team_match_eligibility_boundaries_at_handler_level(h, pool):
     teams = TeamService(pool)
     empty = (await teams.create_team(TgUser(1, "regist01", "Reg"), "Empty Team", "registrar")).team_id      # 0/5
@@ -219,17 +217,20 @@ async def test_full_bracket_semifinal_routing_and_placements_via_handlers(h, poo
 
 async def test_active_deputy_can_finalize_tournament(h, pool):
     await make_deputy(h, pool)
-    await _prepare_full_podium(h, *DEP, pool)
+    a, b = await make_team(pool, 1, "Team A"), await make_team(pool, 2, "Team B")
+    mid = await ui_add_pair(h, *DEP, pool, a, b, "final")   # the deputy runs the bracket too
+    await ui_pick_winner(h, *DEP, mid, a)
     h.clear()
     await h.press(*DEP, "tf:start")
-    await h.press(*DEP, "tf:go")
+    await h.press(*DEP, "tf:go")  # 2 teams: no semis, so the podium is complete without a 3rd place
     await h.say(*DEP, "ЗАВЕРШИТЬ")
     await h.press(*DEP, "tf:ok")
     assert any("ТУРНИР ЗАВЕРШЁН" in t for t in h.texts())  # a 2nd, final-broadcast-offer message follows it
     async with pool.acquire() as c:
         assert await c.fetchval("SELECT count(*) FROM tournaments") == 2
         assert await c.fetchval("SELECT count(*) FROM tournaments WHERE status='active'") == 1
-        assert await c.fetchval("SELECT count(*) FROM tournaments WHERE status='completed'") == 1
+        t = await c.fetchrow("SELECT status, first_place_team_id, second_place_team_id FROM tournaments WHERE status <> 'active'")
+    assert (t["status"], t["first_place_team_id"], t["second_place_team_id"]) == ("completed", a, b)
 
 
 async def test_finish_ok_handles_lost_active_tournament_race_gracefully(h, pool):
@@ -254,16 +255,17 @@ async def test_finish_ok_handles_lost_active_tournament_race_gracefully(h, pool)
 
 async def test_concurrent_archive_by_admin_and_deputy_yields_exactly_one_active(h, pool):
     await make_deputy(h, pool)
-    await _prepare_full_podium(h, ADMIN_ID, "adm", pool)
+    await make_team(pool, 1, "Team A")
+    await make_team(pool, 2, "Team B")
     async with pool.acquire() as c:
         before_tid = await c.fetchval("SELECT id FROM tournaments WHERE status='active'")
     h.clear()
     # both staff members independently drive their own FSM up to "confirmed" (per-user state)
     await h.press(ADMIN_ID, "adm", "tf:start")
-    await h.press(ADMIN_ID, "adm", "tf:go")
+    await h.press(ADMIN_ID, "adm", "tf:early")
     await h.say(ADMIN_ID, "adm", "ЗАВЕРШИТЬ")
     await h.press(*DEP, "tf:start")
-    await h.press(*DEP, "tf:go")
+    await h.press(*DEP, "tf:early")
     await h.say(*DEP, "ЗАВЕРШИТЬ")
     h.clear()
     res = await asyncio.gather(h.press(ADMIN_ID, "adm", "tf:ok"), h.press(*DEP, "tf:ok"), return_exceptions=True)

@@ -98,8 +98,13 @@ def format_team(view: TeamView, viewer_id: Optional[int] = None, *, title: Optio
     if role != "captain":
         lines.append(f"👑 Капитан: {cap.display if cap else 'ожидается'}")
     if role == "registrar":
-        lines.append("(вы не входите в игровой состав)")
+        pos = view.creator_position or "Регистратор"
+        lines.append(f"📝 Вы: {pos} (не входите в игровой состав)")
     lines.append(f"👥 Состав: {view.size}/{MAX_TEAM_SIZE}")
+    if view.creator_position and role != "registrar":
+        lines.append(f"📝 Регистратор: {view.registrar_display} ({view.creator_position})")
+    if getattr(view, "total_rank", 0):
+        lines.append(f"⭐ Суммарный ранг: <b>{view.total_rank}</b>")
     if view.members:
         lines.append("")
         lines += [f"{i}. {'👑 ' if m.is_captain else ''}{m.display}" for i, m in enumerate(view.members, 1)]

@@ -7,10 +7,9 @@ import pytest
 from app.services.admin import AdminService
 from app.services.errors import NotFound, TournamentNotReady
 from app.services.registration import RegistrationService, TgUser
-from app.services.series import SeriesService
 from app.services.team import TeamService
 from app.services.tournament import TournamentService
-from tests.helpers import add_user, make_team
+from tests.helpers import add_user, make_team, set_winner
 
 pytestmark = pytest.mark.db
 
@@ -26,40 +25,77 @@ class FakeBot:
 ADMIN = TgUser(999, "theadmin", "Admin")
 
 
-async def _bracket_to_final(pool, series: SeriesService, adm: AdminService):
+async def _third_place_stage(pool):
+    """TournamentService reads 3rd place from a 'third' stage; the bot's stage list has none yet."""
+    async with pool.acquire() as c:
+        await c.execute("INSERT OR IGNORE INTO stages (code, title, sort_order) VALUES ('third', '3 место', 45)")
+
+
+async def _bracket_to_final(pool, adm: AdminService):
     """4 teams -> 2 semis -> third place + final, everything decided. Returns (champion, second, third)."""
+    await _third_place_stage(pool)
     a, b, c, d = [await make_team(pool, i, f"Team {chr(64 + i)}") for i in range(1, 5)]
     s1 = await adm.create_match(a, b, "semi")
     s2 = await adm.create_match(c, d, "semi")
-    for _ in range(3):
-        await series.add_game(ADMIN, s1, a)  # a beats b
-    for _ in range(3):
-        await series.add_game(ADMIN, s2, d)  # d beats c
-    third = await adm.create_match(b, c, "third")
+    await set_winner(pool, s1, a)  # a beats b
+    await set_winner(pool, s2, d)  # d beats c
+    async with pool.acquire() as conn:  # both semis decided -> the bot creates the 3rd-place match itself
+        row = await conn.fetchrow(
+            "SELECT id, team_a_id, team_b_id FROM matches WHERE stage_code = 'third' "
+            "AND tournament_id = (SELECT id FROM tournaments WHERE status = 'active')"
+        )
+    assert {row["team_a_id"], row["team_b_id"]} == {b, c}
+    third = row["id"]
     final = await adm.create_match(a, d, "final")
-    for _ in range(3):
-        await series.add_game(ADMIN, third, b)
-    for _ in range(3):
-        await series.add_game(ADMIN, final, a)
+    await set_winner(pool, third, b)
+    await set_winner(pool, final, a)
     return a, d, b  # champion=a, second=d, third=b
 
 
 async def test_placements_not_ready_before_final_and_third(pool):
-    adm, series, tour = AdminService(pool), SeriesService(pool, FakeBot()), TournamentService(pool)
+    adm, tour = AdminService(pool), TournamentService(pool)
     a, b = await make_team(pool, 1, "AA"), await make_team(pool, 2, "BB")
     p = await tour.placements()
     assert not p.ready and p.first_id is None
     mid = await adm.create_match(a, b, "final")
-    for _ in range(3):
-        await series.add_game(ADMIN, mid, a)
+    await set_winner(pool, mid, a)
     p = await tour.placements()
-    assert not p.ready  # final done but no third-place match at all
+    assert p.ready  # 2 teams: no semi-finals, so there is no 3rd place to play for
     assert p.first_id == a and p.second_id == b and p.third_id is None
 
 
+async def test_placements_wait_for_third_place_after_semis(pool):
+    adm, tour = AdminService(pool), TournamentService(pool)
+    a, b, c, d = [await make_team(pool, i, f"Team {chr(64 + i)}") for i in range(1, 5)]
+    s1, s2 = await adm.create_match(a, b, "semi"), await adm.create_match(c, d, "semi")
+    await set_winner(pool, s1, a)
+    await set_winner(pool, s2, d)
+    final = await adm.create_match(a, d, "final")
+    await set_winner(pool, final, a)
+    p = await tour.placements()
+    assert not p.ready and p.third_id is None  # the auto-created 3rd-place match is not played yet
+    async with pool.acquire() as conn:
+        third = await conn.fetchrow("SELECT id, team_a_id, team_b_id FROM matches WHERE stage_code = 'third'")
+    assert {third["team_a_id"], third["team_b_id"]} == {b, c}
+    await set_winner(pool, third["id"], c)
+    p = await tour.placements()
+    assert p.ready and (p.first_id, p.second_id, p.third_id) == (a, d, c)
+
+
+async def test_three_teams_single_semi_loser_is_third(pool):
+    adm, tour = AdminService(pool), TournamentService(pool)
+    a, b, c = [await make_team(pool, i, f"Team {chr(64 + i)}") for i in range(1, 4)]
+    s1 = await adm.create_match(a, b, "semi")
+    await set_winner(pool, s1, a)
+    final = await adm.create_match(a, c, "final")
+    await set_winner(pool, final, c)
+    p = await tour.placements()
+    assert p.ready and (p.first_id, p.second_id, p.third_id) == (c, a, b)
+
+
 async def test_full_bracket_placements_correct(pool):
-    adm, series, tour = AdminService(pool), SeriesService(pool, FakeBot()), TournamentService(pool)
-    champ, second, third = await _bracket_to_final(pool, series, adm)
+    adm, tour = AdminService(pool), TournamentService(pool)
+    champ, second, third = await _bracket_to_final(pool, adm)
     p = await tour.placements()
     assert p.ready and p.first_id == champ and p.second_id == second and p.third_id == third
     assert p.first_id != p.second_id != p.third_id != p.first_id  # three distinct teams
@@ -77,8 +113,8 @@ async def test_finalize_requires_force_when_not_ready(pool):
 
 
 async def test_finalize_normal_completion(pool):
-    adm, series, tour = AdminService(pool), SeriesService(pool, FakeBot()), TournamentService(pool)
-    champ, second, third = await _bracket_to_final(pool, series, adm)
+    adm, tour = AdminService(pool), TournamentService(pool)
+    champ, second, third = await _bracket_to_final(pool, adm)
     old_active = await tour.active_id()
     tid, p = await tour.finalize(ADMIN, force=False)
     assert tid == old_active and p.first_id == champ
@@ -89,9 +125,9 @@ async def test_finalize_normal_completion(pool):
 
 
 async def test_new_active_tournament_created_and_is_empty(pool):
-    adm, series, tour = AdminService(pool), SeriesService(pool, FakeBot()), TournamentService(pool)
+    adm, tour = AdminService(pool), TournamentService(pool)
     old_active = await tour.active_id()
-    await _bracket_to_final(pool, series, adm)
+    await _bracket_to_final(pool, adm)
     await tour.finalize(ADMIN, force=False)
     new_active = await tour.active_id()
     assert new_active != old_active
@@ -112,15 +148,17 @@ async def test_only_one_active_tournament_ever(pool):
 
 
 async def test_concurrent_finalize_exactly_one_archive_one_new_active(pool):
-    adm, series, tour = AdminService(pool), SeriesService(pool, FakeBot()), TournamentService(pool)
-    await _bracket_to_final(pool, series, adm)
+    adm, tour = AdminService(pool), TournamentService(pool)
+    await _bracket_to_final(pool, adm)
     await add_user(pool, ADMIN.id, ADMIN.username)
     deputy = TgUser(1000, "deputy001", "Deputy")
     await add_user(pool, deputy.id, deputy.username)
     res = await asyncio.gather(tour.finalize(ADMIN, force=False), tour.finalize(deputy, force=False), return_exceptions=True)
     ok = [r for r in res if not isinstance(r, BaseException)]
     assert len(ok) == 1  # the second finalize finds no active tournament left to finalize
-    assert all(isinstance(r, (NotFound,)) for r in res if isinstance(r, BaseException))
+    # the loser either finds no active tournament (row lock) or, serialised behind the winner's write
+    # lock, already sees the brand-new empty one, which is not ready to be finalized
+    assert all(isinstance(r, (NotFound, TournamentNotReady)) for r in res if isinstance(r, BaseException)), res
     async with pool.acquire() as c:
         assert await c.fetchval("SELECT count(*) FROM tournaments WHERE status = 'active'") == 1
         assert await c.fetchval("SELECT count(*) FROM tournaments WHERE status != 'active'") == 1
@@ -160,11 +198,11 @@ async def test_general_broadcast_only_reaches_active_tournament_participants(poo
 
 # ---------------------------------------------------------------- history
 async def test_history_lists_completed_tournaments_newest_first(pool):
-    adm, series, tour = AdminService(pool), SeriesService(pool, FakeBot()), TournamentService(pool)
+    adm, tour = AdminService(pool), TournamentService(pool)
     await add_user(pool, ADMIN.id, ADMIN.username)
-    await _bracket_to_final(pool, series, adm)
+    await _bracket_to_final(pool, adm)
     tid1, _ = await tour.finalize(ADMIN, force=False)
-    await _bracket_to_final(pool, series, adm)
+    await _bracket_to_final(pool, adm)
     tid2, _ = await tour.finalize(ADMIN, force=False)
     total, page, last, rows = await tour.history_page(0)
     assert total == 2 and [r["id"] for r in rows] == [tid2, tid1]
@@ -178,9 +216,9 @@ async def test_history_is_read_only_no_write_methods_exposed(pool):
 
 async def test_history_snapshot_survives_current_team_changes(pool):
     """A team's roster/name in the ARCHIVED tournament must not shift when new, unrelated data changes."""
-    adm, series, tour = AdminService(pool), SeriesService(pool, FakeBot()), TournamentService(pool)
+    adm, tour = AdminService(pool), TournamentService(pool)
     await add_user(pool, ADMIN.id, ADMIN.username)
-    champ, second, third = await _bracket_to_final(pool, series, adm)
+    champ, second, third = await _bracket_to_final(pool, adm)
     tid, p = await tour.finalize(ADMIN, force=False)
     teams_before = {t["id"]: t["name"] for t in await tour.teams(tid)}
     # create unrelated new-tournament data
@@ -191,14 +229,13 @@ async def test_history_snapshot_survives_current_team_changes(pool):
 
 async def test_history_username_change_does_not_alter_display_snapshot(pool):
     """Changing a player's live Telegram username after archiving must not change history's roster text."""
-    adm, series, teams, tour = AdminService(pool), SeriesService(pool, FakeBot()), TeamService(pool), TournamentService(pool)
+    adm, teams, tour = AdminService(pool), TeamService(pool), TournamentService(pool)
     await add_user(pool, ADMIN.id, ADMIN.username)
     v = await teams.create_team(TgUser(10, "oldname01", "Cap"), "Solo Team", "captain")
     await teams.join_team(TgUser(11, "member011", "Mem"), v.invite_token)
     other = await make_team(pool, 2, "Other")
     mid = await adm.create_match(v.team_id, other, "final")
-    for _ in range(3):
-        await series.add_game(ADMIN, mid, v.team_id)
+    await set_winner(pool, mid, v.team_id)
     tid, p = await tour.finalize(ADMIN, force=True)
     _, members, _ = await tour.team_card(v.team_id)
     before = {m["user_id"]: (m["username"], m["full_name"]) for m in members}
@@ -217,20 +254,20 @@ async def test_history_username_change_does_not_alter_display_snapshot(pool):
 
 
 async def test_history_stats_are_real_and_computed(pool):
-    adm, series, tour = AdminService(pool), SeriesService(pool, FakeBot()), TournamentService(pool)
+    adm, tour = AdminService(pool), TournamentService(pool)
     await add_user(pool, ADMIN.id, ADMIN.username)
-    await _bracket_to_final(pool, series, adm)
+    await _bracket_to_final(pool, adm)
     tid, p = await tour.finalize(ADMIN, force=False)
     row, stats = await tour.detail(tid)
-    assert stats["teams"] == 4 and stats["series"] == 4 and stats["games"] == 12  # 4 series x 3 games each
+    assert stats["teams"] == 4 and stats["series"] == 4 and stats["games"] == 0  # winners are picked in the bracket editor, no per-game log
     breakdown = await tour.bo5_breakdown(tid)
-    assert breakdown and all(b["win"] == 3 and b["lose"] == 0 for b in breakdown)
+    assert breakdown == []  # no per-game scores recorded -> nothing to break down
 
 
 async def test_history_team_card_shows_placement_and_real_roster_size(pool):
-    adm, series, tour = AdminService(pool), SeriesService(pool, FakeBot()), TournamentService(pool)
+    adm, tour = AdminService(pool), TournamentService(pool)
     await add_user(pool, ADMIN.id, ADMIN.username)
-    champ, second, third = await _bracket_to_final(pool, series, adm)
+    champ, second, third = await _bracket_to_final(pool, adm)
     tid, p = await tour.finalize(ADMIN, force=False)
     team, members, played = await tour.team_card(champ)
     assert len(members) == 5 and len(played) == 2  # semi + final

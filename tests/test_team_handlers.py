@@ -34,7 +34,7 @@ async def fresh_team(h, pool):
     await h.press(*CAP, "reg:start")
     await h.press(*CAP, "reg:team")
     await h.say(*CAP, "Alpha Team")
-    await h.press(*CAP, "reg:trole:captain")
+    await h.pick_team_role(*CAP, "captain")
     await h.press(*CAP, "reg:confirm")
     return re.search(r"start=team_([A-Za-z0-9_-]{32,48})", h.last()).group(1)
 
@@ -59,6 +59,7 @@ async def test_join_flow_notifies_captain_once(h, pool):
     await h.say(*P2, f"/start team_{token}")
     h.clear()
     await asyncio.gather(*[h.press(*P2, f"join:ok:{token}") for _ in range(8)])  # double/multi tap
+    await asyncio.gather(*[h.say(*P2, "100") for _ in range(3)])  # ...and the rank sent several times
     assert await members(pool) == 2
     assert any("Вы вступили в команду" in t and "2/5" in t and "Alpha Team" in t for t in h.texts())
     assert "👥 Моя команда" in h.buttons()
@@ -68,15 +69,15 @@ async def test_join_flow_notifies_captain_once(h, pool):
 
 async def test_reopening_link_by_member_is_friendly(h, pool):
     token = await fresh_team(h, pool)
-    await h.press(*P2, f"join:ok:{token}")
+    await h.join(*P2, token)
     h.clear()
     await h.say(*P2, f"/start team_{token}")
     assert "Вы уже состоите в этой команде" in h.last() and "👥 Моя команда" in h.buttons()
-    await h.press(*P2, f"join:ok:{token}")
+    await h.join(*P2, token)
     assert "Вы уже состоите в этой команде" in h.last()
     assert await members(pool) == 2
     h.clear()
-    await h.press(*CAP, f"join:ok:{token}")  # captain clicking their own link
+    await h.join(*CAP, token)  # captain clicking their own link
     assert "уже состоите" in h.last() and await members(pool) == 2
 
 
@@ -86,7 +87,7 @@ async def test_full_team_link(h, pool):
     h.clear()
     await h.say(*P2, f"/start team_{token}")
     assert "В команде больше нет свободных мест" in h.last() and "✅ Вступить в команду" not in h.buttons()
-    await h.press(*P2, f"join:ok:{token}")  # forged press on a stale invitation
+    await h.join(*P2, token)  # forged press on a stale invitation
     assert "В команде больше нет свободных мест" in h.last() and await members(pool) == 5
 
 
@@ -98,7 +99,7 @@ async def test_player_in_another_team_gets_warning(h, pool):
     other = (member_of(2, 1).id, "mem0021")
     await h.say(*other, f"/start team_{token}")
     assert "Вы уже состоите в другой команде" in h.last() and "Сначала необходимо покинуть" in h.last()
-    await h.press(*other, f"join:ok:{token}")
+    await h.join(*other, token)
     assert "Вы уже состоите в другой команде" in h.last()
     async with pool.acquire() as c:
         assert await c.fetchval("SELECT count(*) FROM team_members WHERE user_id = $1", other[0]) == 1
@@ -121,7 +122,7 @@ async def test_nonexistent_and_deleted_team_tokens(h, pool):
     h.clear()
     await h.say(*P2, f"/start team_{token}")
     assert "недействительно" in h.last()
-    await h.press(*P2, f"join:ok:{token}")
+    await h.join(*P2, token)
     assert "недействительно" in h.last() and await members(pool) == 0
 
 
@@ -139,11 +140,11 @@ async def test_subscription_gate_on_join(h, pool):
     token = await fresh_team(h, pool)
     h.tg.chat_state["@MLBangBangTournamentChat"] = "left"
     h.clear()
-    await h.press(*P2, f"join:ok:{token}")
+    await h.join(*P2, token)
     assert await members(pool) == 1
     assert {"📢 Подписаться на канал", "💬 Вступить в чат", "🔄 Проверить подписку"} <= set(h.buttons())
     h.tg.chat_state["@MLBangBangTournamentChat"] = "member"
-    await h.press(*P2, f"join:ok:{token}")  # "Проверить подписку" re-runs the join
+    await h.join(*P2, token)  # "Проверить подписку" re-runs the join
     assert await members(pool) == 2
 
 
@@ -153,7 +154,7 @@ async def test_registration_closed_blocks_join(h, pool):
     h.clear()
     await h.say(*P2, f"/start team_{token}")
     assert "закрыта" in h.last()
-    await h.press(*P2, f"join:ok:{token}")
+    await h.join(*P2, token)
     assert await members(pool) == 1
 
 
@@ -161,14 +162,14 @@ async def test_solo_player_cannot_join(h, pool):
     token = await fresh_team(h, pool)
     await RegistrationService(pool).register_solo(TgUser(P3[0], P3[1], "P3"), "EXP")
     h.clear()
-    await h.press(*P3, f"join:ok:{token}")
+    await h.join(*P3, token)
     assert "соло" in h.last() and await members(pool) == 1
 
 
 # ------------------------------------------------------------------ captain UI
 async def test_captain_team_card_and_invite_screen(h, pool):
     token = await fresh_team(h, pool)
-    await h.press(*P2, f"join:ok:{token}")
+    await h.join(*P2, token)
     h.clear()
     await h.press(*CAP, "team")
     t = h.last()
@@ -205,7 +206,7 @@ async def test_replace_flow_end_to_end(h, pool):
     shown = sent_to(h, CAP[0])[-1]  # what the captain sees (last() would be the notification to the removed player)
     assert "удалён из команды" in shown and "Свободных мест: 1" in shown and f"start=team_{token}" in shown
     assert any("удалил вас из команды" in t for t in sent_to(h, victim.id))  # removed player is told
-    await h.press(*P2, f"join:ok:{token}")  # newcomer without username takes the seat
+    await h.join(*P2, token)  # newcomer without username takes the seat
     assert await members(pool) == 5
     h.clear()
     await h.press(victim.id, "mem0012", "team")  # removed player: stale card

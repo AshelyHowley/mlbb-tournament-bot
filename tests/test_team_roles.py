@@ -1,7 +1,7 @@
 """Registrar / captain / member roles, captain invites, captain transfer, limits and races (service + DB level)."""
 import asyncio
 
-# import asyncpg  # removed for SQLite
+from tests.sqlite_compat import asyncpg
 import pytest
 
 from app.services.admin import AdminService
@@ -68,7 +68,7 @@ async def test_creator_is_ordinary_member_captain_pending(pool):
     assert v.created_by == REG.id and v.role_of(REG.id) == "member" and not v.members[0].is_captain
     assert v.captain_invite_token and v.captain_invite_token != v.invite_token
     async with pool.acquire() as c:
-        assert await c.fetchval("SELECT is_captain FROM team_members") is False
+        assert await c.fetchval("SELECT is_captain FROM team_members") == False
 
 
 async def test_creator_is_registrar_only_and_takes_no_slot(pool):
@@ -76,8 +76,8 @@ async def test_creator_is_registrar_only_and_takes_no_slot(pool):
     v = await svc.create_team(REG, "Alpha", "registrar")
     assert v.size == 0 and v.free == 5 and v.captain_pending and v.role_of(REG.id) == "registrar"
     assert await db_members(pool) == 0
-    assert (await RegistrationService(pool).my_registration(REG.id)).team_role == "registrar"
-    assert not (await RegistrationService(pool).my_registration(REG.id)).plays
+    # registrar-only does not count as a registration of the user themself (they may still play / go solo)
+    assert await RegistrationService(pool).my_registration(REG.id) is None
     assert (await svc.view_for_user(REG.id)).team_id == v.team_id
     await assert_roster_valid(pool)
 
@@ -137,7 +137,7 @@ async def test_captain_accepts_and_becomes_member_and_captain(pool):
     assert not r.already_captain and not r.was_member and r.team.size == 1
     assert r.team.captain_id == CAPT.id and r.team.captain.user_id == CAPT.id and r.team.role_of(CAPT.id) == "captain"
     async with pool.acquire() as c:
-        assert (await c.fetchrow("SELECT is_captain FROM team_members WHERE user_id=$1", CAPT.id))["is_captain"] is True
+        assert (await c.fetchrow("SELECT is_captain FROM team_members WHERE user_id=$1", CAPT.id))["is_captain"] == True
     await assert_roster_valid(pool)
 
 
@@ -385,7 +385,7 @@ async def test_creator_member_is_only_a_member_after_captain_assigned(pool):
         await svc.regenerate_captain_token(REG.id)
     me, view = await svc.leave_team(REG.id)                 # ordinary member may leave; team stays with its captain
     assert view.size == 1 and view.captain_id == CAPT.id
-    assert (await svc.registrar_view(REG.id)).created_by == REG.id  # ...but is still the registrar of record
+    assert await svc.registrar_view(REG.id) is None  # leaving also gives up the registrar role
 
 
 async def test_captain_permissions_remove_replace_invite(pool):
@@ -448,7 +448,8 @@ async def test_transfer_racing_removal_of_the_target(pool):
         # `tournaments` has FK columns pointing at `teams` (first/second/third_place_team_id), so
         # TRUNCATE teams ... CASCADE always wipes the active-tournament row too, regardless of
         # whether `tournaments` is named explicitly - it must be reseeded every iteration.
-        await pool.execute("TRUNCATE broadcasts, matches, team_members, teams, solo_players, tournaments RESTART IDENTITY CASCADE")
+        for t in ("broadcasts", "matches", "teams", "solo_players", "tournaments"):  # members cascade with teams
+            await pool.execute(f"DELETE FROM {t}")
         await pool.execute("INSERT INTO tournaments (status) VALUES ('active')")
         await make_team(pool, 1)
         res = await asyncio.gather(svc.transfer_captaincy(10, 11), svc.remove_member(10, 11), return_exceptions=True)
@@ -470,16 +471,18 @@ async def test_transfer_racing_a_join_at_full_capacity(pool):
 
 
 # ---------------------------------------------------------------- 16: one active registration per user, one team per player
-async def test_ordinary_user_can_register_only_one_team_admin_many(pool):
+async def test_user_may_register_several_teams_but_play_in_one(pool):
     svc = TeamService(pool)
     await svc.create_team(REG, "First", "registrar")
-    for role in ("registrar", "member", "captain"):
+    await svc.create_team(REG, "Second", "registrar")        # registering for others is not limited
+    await svc.create_team(REG, "Third", "member")            # ...and the user may play in one of them
+    for role in ("member", "captain"):                       # but not in a second team
         with pytest.raises(AlreadyRegistered):
-            await svc.create_team(REG, f"Second {role}", role)
+            await svc.create_team(REG, f"Fourth {role}", role)
     for i in range(3):
         await svc.create_team(TgUser(1, "regist01", "Admin"), f"Admin team {i}", "registrar", is_admin=True)
-    async with pool.acquire() as c:
-        assert await c.fetchval("SELECT count(*) FROM teams WHERE created_by = 1") == 4
+    async with pool.acquire() as c:  # REG is user 1 too: 3 own + 3 created with admin rights
+        assert await c.fetchval("SELECT count(*) FROM teams WHERE created_by = 1") == 6
 
 
 async def test_registration_slot_frees_after_cancel(pool):
@@ -505,7 +508,7 @@ async def test_registrar_only_can_still_play_elsewhere_or_solo(pool):
     await svc.create_team(TgUser(70, None, "Reg2"), "Mine2", "registrar")
     await reg.register_solo(TgUser(70, None, "Reg2"), "EXP")
     info = await reg.my_registration(70)
-    assert info.kind == "solo" and info.team_role == "registrar" and info.solo
+    assert info.kind == "solo" and info.team_role is None and info.solo
 
 
 async def test_no_duplicate_membership_across_roles(pool):

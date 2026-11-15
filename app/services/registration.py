@@ -1,5 +1,6 @@
 """Registration state, solo registration and the registration switch. Team lifecycle lives in team.py."""
 from __future__ import annotations
+import asyncio
 import sqlite3
 
 import logging
@@ -106,11 +107,10 @@ class RegistrationService:
                         await log_registration(conn, user.id, 'solo', None, role)
                         await log_action(conn, user.id, user.username, 'solo_register', role)
                         return MyRegistration(kind="solo", role=role, username=norm, full_name=user.full_name, solo=True, stars=stars)
-            except Exception:
+            except sqlite3.IntegrityError:
+                raise AlreadyRegistered("ℹ️ Вы уже зарегистрированы.")
+            except sqlite3.OperationalError:  # "database is locked": retry, then tell the user to try again
                 if attempt == _DEADLOCK_RETRIES - 1:
                     raise Conflict("⚠️ Сервер занят, повторите попытку.")
-            except sqlite3.IntegrityError:
-                raise AlreadyRegistered("ℹ️ Вы уже зарегистрированы.")
-            except sqlite3.IntegrityError:
-                raise AlreadyRegistered("ℹ️ Вы уже зарегистрированы.")
+                await asyncio.sleep(0.05 * (attempt + 1))
         raise Conflict("⚠️ Сервер занят, повторите попытку.")  # pragma: no cover

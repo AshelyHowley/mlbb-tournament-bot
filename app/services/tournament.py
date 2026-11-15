@@ -28,10 +28,13 @@ class Placements:
     second_name: Optional[str]
     third_id: Optional[int]
     third_name: Optional[str]
+    # 3-е место разыгрывается только если в сетке были полуфиналы (при 2 командах его нет)
+    third_required: bool = True
 
     @property
     def ready(self) -> bool:
-        return self.first_id is not None and self.second_id is not None and self.third_id is not None
+        third_ok = self.third_id is not None or not self.third_required
+        return self.first_id is not None and self.second_id is not None and third_ok
 
 
 @dataclass(frozen=True)
@@ -59,9 +62,21 @@ class TournamentService:
             second_id = final["team_b_id"] if final["winner_id"] == final["team_a_id"] else final["team_a_id"]
             second_name = final["team_b"] if final["winner_id"] == final["team_a_id"] else final["team_a"]
         third_id = third_name = None
+        semis = await conn.fetch(
+            "SELECT m.team_a_id, m.team_b_id, m.winner_id, m.status, ta.name AS team_a, tb.name AS team_b "
+            "  FROM matches m LEFT JOIN teams ta ON ta.id = m.team_a_id LEFT JOIN teams tb ON tb.id = m.team_b_id "
+            " WHERE m.tournament_id = $1 AND m.stage_code = 'semi'",
+            tournament_id,
+        )
         if third and third["status"] == "finished":
             third_id, third_name = third["winner_id"], third["winner"]
-        return Placements(first_id, first_name, second_id, second_name, third_id, third_name)
+        elif third is None and len(semis) == 1 and semis[0]["status"] == "finished":
+            # 3 команды: полуфинал один (вторая команда прошла в финал без игры) - его проигравший 3-й
+            s = semis[0]
+            a_won = s["winner_id"] == s["team_a_id"]
+            third_id, third_name = (s["team_b_id"], s["team_b"]) if a_won else (s["team_a_id"], s["team_a"])
+        third_required = third is not None or bool(semis)
+        return Placements(first_id, first_name, second_id, second_name, third_id, third_name, third_required)
 
     async def placements(self) -> Placements:
         async with self.pool.acquire() as conn:

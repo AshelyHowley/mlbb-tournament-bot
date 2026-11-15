@@ -13,13 +13,13 @@ async def create_invite(conn, created_by: int, token: str) -> int:
 
 async def get_invite_by_token(conn, token: str, lock: bool = False) -> Optional[dict]:
     return await conn.fetchrow(
-        "SELECT * FROM deputy_invites WHERE token = $1" + (" FOR UPDATE" if lock else ""), token
+        "SELECT * FROM deputy_invites WHERE token = $1", token  # SQLite: BEGIN IMMEDIATE already serialises writers
     )
 
 
 async def get_invite(conn, invite_id: int, lock: bool = False) -> Optional[dict]:
     return await conn.fetchrow(
-        "SELECT * FROM deputy_invites WHERE id = $1" + (" FOR UPDATE" if lock else ""), invite_id
+        "SELECT * FROM deputy_invites WHERE id = $1", invite_id
     )
 
 

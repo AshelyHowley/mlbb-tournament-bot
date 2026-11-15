@@ -12,7 +12,7 @@ from app.services.errors import DeputyInviteClaimed, DeputyLimitReached, NotFoun
 from app.services.registration import TgUser
 from app.utils.text import INVITE_TOKEN_RE, new_invite_token
 
-_DEPUTY_LIMIT = "MB008"
+MAX_DEPUTIES = 2
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,7 @@ class DeputyService:
 
     async def create_invite(self, created_by: int) -> str:
         async with self.pool.acquire() as conn:
-            if await deputies_repo.active_count(conn) >= 2:
+            if await deputies_repo.active_count(conn) >= MAX_DEPUTIES:
                 raise DeputyLimitReached()
             token = new_invite_token()
             await deputies_repo.create_invite(conn, created_by, token)
@@ -72,12 +72,10 @@ class DeputyService:
                 inv = await deputies_repo.get_invite(conn, invite_id, lock=True)
                 if not inv or inv["status"] != "claimed":
                     raise NotFound("Заявка")
-                try:
-                    await deputies_repo.add_deputy(conn, inv["candidate_id"], invite_id, main_admin_id)
-                except asyncpg.PostgresError as e:
-                    if e.sqlstate == _DEPUTY_LIMIT:
-                        raise DeputyLimitReached()
-                    raise
+                # the limit used to be a PostgreSQL trigger; BEGIN IMMEDIATE makes this check-then-insert atomic
+                if not await deputies_repo.is_active_deputy(conn, inv["candidate_id"])                         and await deputies_repo.active_count(conn) >= MAX_DEPUTIES:
+                    raise DeputyLimitReached()
+                await deputies_repo.add_deputy(conn, inv["candidate_id"], invite_id, main_admin_id)
                 await deputies_repo.decide_invite(conn, invite_id, "approved", main_admin_id)
             return await deputies_repo.get_invite(conn, invite_id)
 

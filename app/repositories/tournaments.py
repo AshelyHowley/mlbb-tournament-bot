@@ -102,12 +102,13 @@ async def stats(conn, tournament_id: int) -> dict:
 async def bo5_breakdown(conn, tournament_id: int) -> list[dict]:
     return await conn.fetch(
         """
-        SELECT greatest(wa, wb) AS win, least(wa, wb) AS lose, count(*) AS n FROM (
+        SELECT max(wa, wb) AS win, min(wa, wb) AS lose, count(*) AS n FROM (
             SELECT m.id,
-                   (SELECT count(*) FROM match_games g WHERE g.match_id = m.id AND g.winner_team_id = m.team_a_id) wa,
-                   (SELECT count(*) FROM match_games g WHERE g.match_id = m.id AND g.winner_team_id = m.team_b_id) wb
+                   (SELECT count(*) FROM match_games g WHERE g.match_id = m.id AND g.winner_id = m.team_a_id) wa,
+                   (SELECT count(*) FROM match_games g WHERE g.match_id = m.id AND g.winner_id = m.team_b_id) wb
               FROM matches m WHERE m.tournament_id = $1 AND m.status = 'finished'
-        ) s GROUP BY 1, 2 ORDER BY 1 DESC, 2 DESC
+        ) s WHERE wa + wb > 0  -- a winner picked in the bracket editor has no per-game score
+        GROUP BY 1, 2 ORDER BY 1 DESC, 2 DESC
         """,
         tournament_id,
     )

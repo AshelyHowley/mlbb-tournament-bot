@@ -2,7 +2,7 @@
 broad-but-bounded staff permissions (everything except managing other deputies)."""
 import asyncio
 
-# import asyncpg  # removed for SQLite
+from tests.sqlite_compat import asyncpg
 import pytest
 
 from app.services.deputy import DeputyService
