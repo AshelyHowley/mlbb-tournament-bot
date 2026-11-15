@@ -278,3 +278,19 @@ async def test_bracket_image_cache_follows_changes(pool):
     s1, _ = await _rows(pool, "semi")
     await set_winner(pool, s1["id"], s1["team_a_id"])
     assert await active_bracket_png(pool) != first
+
+
+def test_bracket_font_has_cyrillic_without_system_fonts(monkeypatch):
+    """On the server there are no system fonts: the bundled DejaVu must be found (no tofu boxes)."""
+    from app.services import bracket_image as bi
+    monkeypatch.setattr(bi, "_FONT_CANDIDATES", {
+        k: [p for p in v if "assets" in p] for k, v in bi._FONT_CANDIDATES.items()
+    })
+    bi._font.cache_clear()
+    try:
+        for bold in (False, True):
+            f = bi._font(20, bold)
+            assert f.getname()[0] == "DejaVu Sans"
+            assert f.getlength("ЧЕМПИОН") > f.getlength("Ч") * 5  # real glyphs, not one-size boxes
+    finally:
+        bi._font.cache_clear()

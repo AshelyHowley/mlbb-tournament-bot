@@ -25,27 +25,38 @@ STAGE_LABEL = {"playin": "ОТБОР", "r32": "1/32", "r16": "1/16", "r8": "1/8"
 THIRD_LABEL = "МАТЧ ЗА 3 МЕСТО"
 THIRD_GAP = 34                          # место под подпись над матчем за 3-е место
 
-_FONT_CANDIDATES = [
-    os.environ.get("BRACKET_FONT", ""),
-    os.path.join(os.path.dirname(__file__), "..", "assets", "fonts", "NotoSans-Regular.ttf"),
-    "segoeui.ttf", "arial.ttf",                                            # Windows
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",                     # Linux
-    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    "/System/Library/Fonts/Supplemental/Arial.ttf",                        # macOS
-]
+_FONTS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets", "fonts")
+# Свой шрифт с кириллицей лежит в проекте: на сервере (Railway, Linux-контейнер) системных шрифтов
+# нет, и без него вместо русских букв рисовались квадратики.
+_FONT_CANDIDATES = {
+    False: [
+        os.environ.get("BRACKET_FONT", ""),
+        os.path.join(_FONTS_DIR, "DejaVuSans.ttf"),
+        "segoeui.ttf", "arial.ttf",                                        # Windows
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",                 # Linux
+        "/System/Library/Fonts/Supplemental/Arial.ttf",                    # macOS
+    ],
+    True: [
+        os.environ.get("BRACKET_FONT_BOLD", ""),
+        os.path.join(_FONTS_DIR, "DejaVuSans-Bold.ttf"),
+        "segoeuib.ttf", "arialbd.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+}
 
 
-@lru_cache(maxsize=16)
-def _font(size: int):
-    for path in _FONT_CANDIDATES:
+@lru_cache(maxsize=32)
+def _font(size: int, bold: bool = False):
+    for path in _FONT_CANDIDATES[bold]:
         if not path:
             continue
         try:
             return ImageFont.truetype(path, size)
         except OSError:
             continue
-    return ImageFont.load_default(size)          # Pillow >= 10.1; кириллицу может не знать
+    if bold:
+        return _font(size)
+    return ImageFont.load_default(size)          # последний шанс; кириллицы в нём нет
 
 
 def _fit(text: str, font, max_w: float) -> str:
@@ -101,7 +112,7 @@ def render_bracket_image(rows: list[dict], title: str = "Турнир", subtitle
         H = third_y + PH + MB
     img = Image.new("RGB", (W * S, H * S), BG)
     d = ImageDraw.Draw(img)
-    f, f_t, f_s = _font(11 * S), _font(16 * S), _font(10 * S)
+    f, f_t, f_s = _font(11 * S), _font(16 * S, bold=True), _font(10 * S)
     sc = lambda v: int(round(v * S))
 
     d.text((sc(W // 2), sc(14)), title, fill=TXT, font=f_t, anchor="mt")
@@ -156,8 +167,8 @@ def render_bracket_image(rows: list[dict], title: str = "Турнир", subtitle
         name = champion_row.get("winner") or champion_row.get("team_a") or final.get("winner")
         d.rounded_rectangle([sc(x), sc(y), sc(x + SW), sc(y + PH - 4)], sc(6), fill=FILL_WIN if name else FILL_EMPTY,
                             outline=GOLD if name else None, width=S)
-        d.text((sc(x + SW / 2), sc(y + (PH - 4) / 2)), _fit(name or "—", _font(13 * S), sc(SW - 16)),
-               fill=TXT, font=_font(13 * S), anchor="mm")
+        d.text((sc(x + SW / 2), sc(y + (PH - 4) / 2)), _fit(name or "—", _font(13 * S, bold=True), sc(SW - 16)),
+               fill=TXT, font=_font(13 * S, bold=True), anchor="mm")
         d.line([(sc(ML + col_of["final"] * COL + SW), sc(y + PH / 2)), (sc(x), sc(y + PH / 2))], fill=LN, width=S)
 
     buf = BytesIO()
