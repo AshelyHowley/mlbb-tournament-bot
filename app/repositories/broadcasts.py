@@ -44,17 +44,28 @@ async def interrupt_stale(conn) -> int:
     return int(r.split()[-1])
 
 
-async def recipients(conn, audience: str) -> list[int]:
+async def recipients(conn, audience: str, exclude: Optional[int] = None) -> list[int]:
+    """captains: each team's captain, or its registrar while the team has no captain.
+    solo: solo players not yet assembled into a team (those are reached as team players).
+    all: every team player, every registrar and every solo player.
+    `exclude` (the sending admin) never receives their own broadcast."""
     active = "(SELECT id FROM tournaments WHERE status = 'active')"
     parts = []
-    if audience in ("captains", "all"):
-        parts.append(f"SELECT captain_id AS uid FROM teams WHERE tournament_id = {active} AND captain_id IS NOT NULL")
-    if audience in ("solo", "all"):
-        parts.append(f"SELECT user_id AS uid FROM solo_players WHERE tournament_id = {active}")
+    if audience == "captains":
+        parts.append(f"SELECT COALESCE(captain_id, created_by) AS uid FROM teams WHERE tournament_id = {active}")
+    if audience == "solo":
+        parts.append(
+            f"SELECT s.user_id AS uid FROM solo_players s WHERE s.tournament_id = {active} AND NOT EXISTS ("
+            "SELECT 1 FROM team_members m JOIN teams t ON t.id = m.team_id "
+            f"WHERE m.user_id = s.user_id AND t.from_solo = 1 AND t.tournament_id = {active})"
+        )
     if audience == "all":
+        parts.append(f"SELECT user_id AS uid FROM solo_players WHERE tournament_id = {active}")
         parts.append(f"SELECT m.user_id AS uid FROM team_members m JOIN teams t ON t.id = m.team_id WHERE t.tournament_id = {active}")
+        parts.append(f"SELECT created_by AS uid FROM teams WHERE tournament_id = {active}")
     if not parts:
         return []
-    sql = "SELECT DISTINCT r.uid FROM (" + " UNION ".join(parts) + ") r JOIN users u ON u.telegram_id = r.uid WHERE COALESCE(u.is_blocked, 0) = 0"
-    rows = await conn.fetch(sql)
-    return [r["uid"] for r in rows if r["uid"]]
+    sql = ("SELECT DISTINCT r.uid FROM (" + " UNION ".join(parts) + ") r JOIN users u ON u.telegram_id = r.uid "
+           "WHERE COALESCE(u.is_blocked, 0) = 0 AND r.uid IS NOT NULL AND r.uid IS NOT $1 ORDER BY r.uid")
+    rows = await conn.fetch(sql, exclude)
+    return [r["uid"] for r in rows]

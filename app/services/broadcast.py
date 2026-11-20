@@ -143,7 +143,7 @@ class BroadcastService:
         validate_payload(payload)
         async with self.pool.acquire() as conn:
             bid = await bc_repo.create_draft(conn, admin_id, audience, payload.content_type, payload.text, payload.file_id)
-            count = len(await bc_repo.recipients(conn, audience))
+            count = len(await bc_repo.recipients(conn, audience, exclude=admin_id))
         return bid, count
 
     async def get(self, bid: int):
@@ -164,7 +164,7 @@ class BroadcastService:
                 row = await bc_repo.get(conn, bid)
                 if not row or row["admin_id"] != admin_id:
                     raise NotFound("Рассылка")
-                recipients = await bc_repo.recipients(conn, row["audience"])
+                recipients = await bc_repo.recipients(conn, row["audience"], exclude=admin_id)
                 claimed = await bc_repo.claim(conn, bid, len(recipients))
         if claimed is None:
             raise Conflict("ℹ️ Эта рассылка уже отправлена или отменена.")

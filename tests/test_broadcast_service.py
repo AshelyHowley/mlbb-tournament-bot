@@ -48,6 +48,41 @@ async def test_audiences(pool):
     assert await recipients(pool, "all") == [1, 2, 10, 11, 300, 301]  # every team member and solo player; not 999
 
 
+async def test_registrar_reached_while_team_has_no_captain(pool):
+    await seed(pool)
+    teams = TeamService(pool)
+    v = await teams.create_team(TgUser(50, "registr1", "R"), "Gamma", role="registrar")
+    assert await recipients(pool, "captains") == [1, 2, 50]
+    assert 50 in await recipients(pool, "all")
+    await teams.accept_captain(TgUser(60, "newcapt1", "NC"), v.captain_invite_token)
+    assert await recipients(pool, "captains") == [1, 2, 60]  # the captain replaces the registrar
+    assert {50, 60} <= set(await recipients(pool, "all"))  # the registrar still gets general news
+
+
+async def test_sender_never_receives_own_broadcast(pool):
+    await seed(pool)
+    assert await recipients(pool, "captains") == [1, 2]
+    async with pool.acquire() as c:
+        assert await bc_repo.recipients(c, "captains", exclude=1) == [2]
+
+
+async def test_solo_audience_skips_players_assembled_into_teams(pool):
+    from app.services import solo_teams
+    await seed(pool)
+    reg = RegistrationService(pool)
+    for uid in (12, 13, 14):
+        await reg.register_solo(TgUser(uid, f"solo{uid:04d}", f"S{uid}"), "EXP")
+    for uid in (15, 16):  # 7 solos -> one team of 5, two left over
+        await reg.register_solo(TgUser(uid, f"solo{uid:04d}", f"S{uid}"), "MID")
+    plan, _ = await solo_teams.assemble(pool)
+    built = {s.player.user_id for s in plan.teams[0].seats}
+    left = {p.user_id for p in plan.leftovers}
+    assert await recipients(pool, "solo") == sorted(left)
+    everyone = set(await recipients(pool, "all"))
+    assert built | left <= everyone  # assembled players are still reached as team players
+    assert plan.teams[0].captain.user_id in await recipients(pool, "captains")
+
+
 async def test_blocked_users_excluded(pool):
     await seed(pool)
     async with pool.acquire() as c:
