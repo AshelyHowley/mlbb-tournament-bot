@@ -12,9 +12,9 @@ from tests.helpers import dummy_method, make_team, member_of
 pytestmark = pytest.mark.db
 
 R = (1, "regist01")      # registrar
-C = (2, None)            # future captain, no username
+C = (2, "captain02")      # future captain
 P3 = (3, "player03")
-P4 = (4, None)
+P4 = (4, "player04")
 LINK = re.compile(r"start=(team|captain)_([A-Za-z0-9_-]{32,48})")
 
 
@@ -304,9 +304,9 @@ async def test_my_registration_texts_for_each_role(h, pool):
     t = h.last()
     assert "Cap Team" in t and "👑 Ваша роль: Капитан" in t and "Состав: 1/5" in t and "Капитан:" not in t.replace("Ваша роль: Капитан", "")
     # member, captain pending
-    await create_via_ui(h, (20, None), "member", name="Mem Team")
+    await create_via_ui(h, (20, "member20"), "member", name="Mem Team")
     h.clear()
-    await h.press(20, None, "me")
+    await h.press(20, "member20", "me")
     t = h.last()
     assert "🎮 Ваша роль: Участник" in t and "👑 Капитан: ожидается" in t and "Состав: 1/5" in t and "None" not in t
     # registrar only
@@ -318,12 +318,12 @@ async def test_my_registration_texts_for_each_role(h, pool):
     # the registrar follows the team under "Моя команда"; once the captain is assigned they see the name
     async with pool.acquire() as c:
         ctok = await c.fetchval("SELECT captain_invite_token FROM teams WHERE name='Reg Team'")
-    await h.press(40, None, f"cap:ok:{ctok}")
+    await h.press(40, "captain40", f"cap:ok:{ctok}")
     h.clear()
     await h.press(30, "reg0030", "team")
-    assert "Капитан: U40" in h.last() and "Состав: 1/5" in h.last()
+    assert "Капитан: U40 — @captain40" in h.last() and "Состав: 1/5" in h.last()
     h.clear()
-    await h.press(20, None, "me")
+    await h.press(20, "member20", "me")
     assert "🎮 Ваша роль: Участник" in h.last()
 
 
@@ -397,12 +397,12 @@ async def test_replacement_still_works_after_captain_link_flow(h, pool):
     await h.press(*C, f"cap:ok:{await captain_link_of(h)}")
     async with pool.acquire() as c:
         ptok = await c.fetchval("SELECT invite_token FROM teams")
-    for who in (P3, P4, (5, None), (6, "player06")):
+    for who in (P3, P4, (5, "player05"), (6, "player06")):
         await h.join(*who, ptok)
     assert await counts(pool) == (1, 5)
     await h.press(*C, f"team:rpok:{P3[0]}")
     assert await counts(pool) == (1, 4)
-    await h.join(7, None, ptok)
+    await h.join(7, "player07", ptok)
     assert await counts(pool) == (1, 5)
 
 

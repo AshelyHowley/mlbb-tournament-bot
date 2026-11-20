@@ -146,15 +146,25 @@ async def test_duplicate_name_detected_early(h, pool):
     assert "уже зарегистрирована" in h.last()
 
 
-async def test_user_without_username_can_register_team_and_solo(h, pool):
-    await create_team_flow(h, 60, None, "Nameless")
-    await h.press(60, None, "reg:confirm")
-    assert "Команда создана" in h.last() and "None" not in h.last()
-    await h.press(61, None, "reg:solo")
-    await h.pick_solo_role(61, None, "MID")
-    assert "None" not in h.last()
+async def test_user_without_username_is_asked_to_create_one(h, pool):
+    await h.press(60, None, "reg:start")
+    assert "Нужен username" in h.last() and "Выберите тип регистрации" not in h.texts()
+    for entry in ("reg:team", "reg:solo"):  # stale buttons from an old message do not bypass the gate
+        h.clear()
+        await h.press(60, None, entry)
+        assert "Нужен username" in h.last()
+    assert await counts(pool) == (0, 0, 0)
+    h.clear()
+    await h.press(60, "nowhasname", "reg:start")  # created one and pressed "check"
+    assert "Выберите тип регистрации" in h.last()
+
+
+async def test_username_removed_mid_flow_blocks_confirm(h, pool):
+    await create_team_flow(h, 61, "willremove", "Gone Name")
     await h.press(61, None, "reg:confirm")
-    assert await counts(pool) == (1, 1, 0)
+    assert "Нужен username" in h.last() and await counts(pool) == (0, 0, 0)
+    await h.press(61, "willremove", "reg:confirm")  # retry button keeps the flow
+    assert "Команда создана" in h.last() and await counts(pool) == (1, 0, 0)
 
 
 async def test_html_injection_is_escaped(h, pool):

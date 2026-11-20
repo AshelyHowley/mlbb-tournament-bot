@@ -8,7 +8,7 @@ from aiogram.filters import BaseFilter
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, TelegramObject
 
 from app.bot.context import Services
-from app.keyboards.common import main_menu
+from app.keyboards.common import main_menu, need_username
 from app.services.registration import MyRegistration, TgUser
 from app.services.team import MAX_TEAM_SIZE, TeamView
 from app.utils.text import esc, person
@@ -37,6 +37,24 @@ class IsStaff(BaseFilter):
 def tg_user(event: Union[Message, CallbackQuery]) -> TgUser:
     u = event.from_user
     return TgUser(id=u.id, username=u.username, full_name=u.full_name or "")
+
+
+USERNAME_REQUIRED = (
+    "⚠️ <b>Нужен username в Telegram</b>\n\n"
+    "Для регистрации на турнир у вашего аккаунта должен быть username (@имя) — "
+    "по нему с вами свяжутся организаторы и соперники.\n\n"
+    "Как создать: Telegram → Настройки → Имя пользователя. "
+    "Задайте его и нажмите «Проверить», чтобы продолжить регистрацию."
+)
+
+
+async def require_username(cb: CallbackQuery, retry_cb: str, cancel_cb: str = "menu") -> bool:
+    """True when the user has a Telegram @username; otherwise asks them to create one and returns False.
+    Telegram sends the current username with every update, so the retry button sees a fresh value."""
+    if (cb.from_user.username or "").strip():
+        return True
+    await show(cb, USERNAME_REQUIRED, need_username(retry_cb, cancel_cb))
+    return False
 
 
 _last_bot_msg: dict[int, int] = {}

@@ -168,3 +168,30 @@ async def list_all(conn) -> list[dict]:
 
 async def delete(conn, team_id: int) -> bool:
     return (await conn.execute("DELETE FROM teams WHERE id = $1", team_id)) == "DELETE 1"
+
+
+_CAPTAINS_SQL = (
+    "FROM teams t JOIN users u ON u.telegram_id = t.captain_id "
+    f"WHERE t.tournament_id = {_ACTIVE} AND t.captain_id IS NOT NULL"
+)
+
+
+async def captains_count(conn) -> int:
+    return await conn.fetchval("SELECT count(*) " + _CAPTAINS_SQL)
+
+
+async def captains_page(conn, limit: int, offset: int) -> list[dict]:
+    """Teams with an appointed captain, for picking whom to message personally."""
+    return await conn.fetch(
+        "SELECT t.id, t.name, t.captain_id, u.username, u.full_name " + _CAPTAINS_SQL
+        + " ORDER BY t.name_norm, t.id LIMIT $1 OFFSET $2",
+        limit, offset,
+    )
+
+
+async def captain_team(conn, user_id: int) -> Optional[dict]:
+    """The active-tournament team this user captains, with the captain's display data."""
+    return await conn.fetchrow(
+        "SELECT t.id, t.name, t.captain_id, u.username, u.full_name " + _CAPTAINS_SQL + " AND t.captain_id = $1",
+        user_id,
+    )

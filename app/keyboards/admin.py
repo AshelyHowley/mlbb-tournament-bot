@@ -15,6 +15,7 @@ def admin_menu(is_main_admin: bool = True) -> InlineKeyboardMarkup:
         [B(text="👥 Список команд", callback_data="adm:t:0"), B(text="👤 Соло-игроки", callback_data="adm:s:0")],
         [B(text="🏆 Турнирная сетка", callback_data="adm:bracket")],
         [B(text="📢 Рассылка", callback_data="adm:bc"), B(text="🔐 Регистрация", callback_data="adm:reg")],
+        [B(text="🔎 Проверка участников", callback_data="chk:menu")],
         [B(text="📋 История регистраций", callback_data="log:reg"), B(text="📜 Логи действий", callback_data="log:act")],
         [B(text="📚 История турниров", callback_data="hist:0"), B(text="🏁 Завершить турнир", callback_data="tf:start")],
     ]
@@ -164,6 +165,7 @@ def confirm_game_edit(game_id: int, tid: int, mid: int) -> InlineKeyboardMarkup:
 # ---- broadcast ----
 def bc_audience() -> InlineKeyboardMarkup:
     rows = [[B(text=title, callback_data=f"bc:aud:{key}")] for key, title in AUDIENCES.items()]
+    rows.append([B(text="✉️ Написать капитану лично", callback_data="dm:list:0")])
     rows.append([B(text="📤 Сетка всем", callback_data="qb:bracket:all"), B(text="📤 Сетка капитанам", callback_data="qb:bracket:captains")])
     rows.append([B(text="◀️ Админ-панель", callback_data="adm")])
     return kb(rows)
@@ -178,6 +180,50 @@ def bc_confirm(bid: int) -> InlineKeyboardMarkup:
         [B(text="📤 Отправить", callback_data=f"bc:send:{bid}")],
         [B(text="✏️ Изменить", callback_data=f"bc:edit:{bid}"), B(text="❌ Отмена", callback_data=f"bc:cancel:{bid}")],
     ])
+
+
+# ---- personal messages to captains ----
+def dm_captains(rows: Sequence, page: int, last: int) -> InlineKeyboardMarkup:
+    items = [[B(text=f"{r['name'][:24]} — {person_plain(r['full_name'], r['username'], r['captain_id'])[:30]}",
+                callback_data=f"dm:to:{r['captain_id']}")] for r in rows]
+    nav = [pager("dm:list", page, last)] if last > 0 else []
+    return kb(items + nav + [[B(text="◀️ Рассылка", callback_data="adm:bc")]])
+
+
+def dm_cancel() -> InlineKeyboardMarkup:
+    return kb([[B(text="❌ Отмена", callback_data="dm:abort")]])
+
+
+def dm_reply(staff_id: int) -> InlineKeyboardMarkup:
+    """Under a staff message delivered to a captain."""
+    return kb([[B(text="✉️ Ответить организатору", callback_data=f"dmr:{staff_id}")]])
+
+
+def dm_answer(captain_id: int) -> InlineKeyboardMarkup:
+    """Under a captain's reply delivered to staff."""
+    return kb([[B(text="✉️ Ответить капитану", callback_data=f"dm:to:{captain_id}")]])
+
+
+# ---- participant checks ----
+def checks_menu() -> InlineKeyboardMarkup:
+    return kb([
+        [B(text="📢 Канал и чат (все участники)", callback_data="chk:sub")],
+        [B(text="🔤 Наличие username", callback_data="chk:uname")],
+        [B(text="◀️ Админ-панель", callback_data="adm")],
+    ])
+
+
+def checks_sub_result(has_offenders: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if has_offenders:
+        rows.append([B(text="📨 Напомнить нарушителям", callback_data="chk:subnotify")])
+    rows.append([B(text="🔄 Проверить снова", callback_data="chk:sub")])
+    rows.append([B(text="◀️ Проверка участников", callback_data="chk:menu")])
+    return kb(rows)
+
+
+def checks_back() -> InlineKeyboardMarkup:
+    return kb([[B(text="◀️ Проверка участников", callback_data="chk:menu")]])
 
 
 # ---- series/final result notifications ----

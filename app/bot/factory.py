@@ -10,10 +10,12 @@ from app.bot.context import Services
 from app.config import Config
 from app.handlers import (
     admin_broadcast,
+    admin_checks,
     admin_deputies,
     admin_history,
     admin_notify,
     admin_panel,
+    contact,
     fallback,
     registration,
     reviews,
@@ -25,6 +27,7 @@ from app.middlewares.core import UserTrackMiddleware
 from app.services.admin import AdminService
 from app.services.broadcast import BroadcastService
 from app.services.deputy import DeputyService
+from app.services.participant_check import ParticipantCheckService
 from app.services.player_archive import PlayerArchive, archive_path_for
 from app.services.registration import RegistrationService
 from app.services.result_notify import ResultNotifyService
@@ -40,11 +43,12 @@ def build_bot(cfg: Config) -> Bot:
 
 
 def build_services(cfg: Config, pool: object, bot: Bot) -> Services:
+    sub = SubscriptionService(bot, cfg.channel_id, cfg.chat_id)
     return Services(
         cfg=cfg,
         reg=RegistrationService(pool),
         admin=AdminService(pool),
-        sub=SubscriptionService(bot, cfg.channel_id, cfg.chat_id),
+        sub=sub,
         bc=BroadcastService(pool, bot),
         team=TeamService(pool),
         bot=bot,
@@ -54,6 +58,7 @@ def build_services(cfg: Config, pool: object, bot: Bot) -> Services:
         result_notify=ResultNotifyService(pool, bot),
         roles=RoleService(pool, cfg),
         archive=PlayerArchive(archive_path_for(cfg.database_url)),
+        check=ParticipantCheckService(pool, bot, sub),
     )
 
 
@@ -69,7 +74,7 @@ def build_dispatcher(svc: Services, pool: object) -> Dispatcher:
     # (IsStaff, or IsAdmin for deputy management), fallback last
     for r in (
         team.router, start.router, reviews.router, admin_panel.router, admin_notify.router,
-        admin_deputies.router, admin_history.router, admin_broadcast.router, registration.router, fallback.router,
+        admin_deputies.router, admin_history.router, admin_broadcast.router, admin_checks.router, contact.router, registration.router, fallback.router,
     ):
         dp.include_router(r)
     return dp

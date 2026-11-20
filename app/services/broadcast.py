@@ -57,16 +57,17 @@ def validate_payload(p: Payload) -> None:
         raise ValidationError("❌ Поддерживаются текст, фото, видео и документ.")
 
 
-async def send_payload(bot: Bot, chat_id: int, p: Payload) -> None:
+async def send_payload(bot: Bot, chat_id: int, p: Payload, reply_markup=None) -> None:
     # parse_mode=None: admin text is delivered verbatim, never interpreted as HTML.
+    kw = {"reply_markup": reply_markup} if reply_markup is not None else {}
     if p.content_type == "text":
-        await bot.send_message(chat_id, p.text, parse_mode=None)
+        await bot.send_message(chat_id, p.text, parse_mode=None, **kw)
     elif p.content_type == "photo":
-        await bot.send_photo(chat_id, p.file_id, caption=p.text, parse_mode=None)
+        await bot.send_photo(chat_id, p.file_id, caption=p.text, parse_mode=None, **kw)
     elif p.content_type == "video":
-        await bot.send_video(chat_id, p.file_id, caption=p.text, parse_mode=None)
+        await bot.send_video(chat_id, p.file_id, caption=p.text, parse_mode=None, **kw)
     else:
-        await bot.send_document(chat_id, p.file_id, caption=p.text, parse_mode=None)
+        await bot.send_document(chat_id, p.file_id, caption=p.text, parse_mode=None, **kw)
 
 
 async def deliver(

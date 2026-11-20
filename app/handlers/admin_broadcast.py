@@ -10,10 +10,12 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot.context import Services
 from app.handlers.common import IsStaff, show
+from app.handlers.contact import deliver_personal, extract_payload
 from app.keyboards import admin as akb
-from app.services.broadcast import AUDIENCES, Payload, send_payload
+from app.repositories import teams as teams_repo
+from app.services.broadcast import AUDIENCES, Payload, send_payload, validate_payload
 from app.services.errors import ServiceError
-from app.utils.text import esc, parse_int
+from app.utils.text import esc, parse_int, person
 
 log = logging.getLogger(__name__)
 router = Router(name="admin_broadcast")
@@ -138,3 +140,79 @@ async def bc_send(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
         await show(cb, e.user_message, akb.admin_menu())
         return
     await show(cb, f"📤 Рассылка #{bid} запущена. Получателей: <b>{total}</b>.\nПо завершении пришлю отчёт.", akb.admin_menu())
+
+
+# ------------------------------------------------------------------ personal message to one captain
+DM_PAGE = 10
+
+
+class DirectMsg(StatesGroup):
+    content = State()
+
+
+@router.callback_query(F.data.regexp(r"^dm:list:\d{1,6}$"))
+async def dm_list(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
+    await cb.answer()
+    await state.clear()
+    page = int(cb.data.split(":")[2])
+    async with svc.team.pool.acquire() as conn:
+        total = await teams_repo.captains_count(conn)
+        last = max(0, (total - 1) // DM_PAGE)
+        page = min(page, last)
+        rows = await teams_repo.captains_page(conn, DM_PAGE, page * DM_PAGE)
+    if not rows:
+        await show(cb, "ℹ️ Пока нет команд с назначенным капитаном.", akb.bc_audience())
+        return
+    await show(cb, "✉️ <b>Личное сообщение капитану</b>\n\nВыберите команду — сообщение получит только её капитан, "
+                   "и он сможет ответить вам через бота.", akb.dm_captains(rows, page, last))
+
+
+@router.callback_query(F.data.regexp(r"^dm:to:\d{1,18}$"))
+async def dm_pick(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
+    await cb.answer()
+    uid = parse_int(cb.data.split(":")[2])
+    async with svc.team.pool.acquire() as conn:
+        team = await teams_repo.captain_team(conn, uid) if uid else None
+    if team is None:
+        await show(cb, "ℹ️ Этот пользователь больше не капитан команды.", akb.admin_menu(svc.cfg.is_bot_admin(cb.from_user.id)))
+        return
+    await state.clear()
+    await state.set_state(DirectMsg.content)
+    await state.update_data(dm_to=uid, dm_team=team["name"])
+    await cb.message.answer(
+        f"✉️ Кому: {person(team['full_name'], team['username'], uid)} — капитан «{esc(team['name'])}»\n\n"
+        "Отправьте сообщение: текст, фото, видео или документ (с подписью). Текст отправляется как есть.",
+        reply_markup=akb.dm_cancel(),
+    )
+
+
+@router.callback_query(F.data == "dm:abort")
+async def dm_abort(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
+    await cb.answer("Отменено")
+    await state.clear()
+    await show(cb, "🛠 <b>Админ-панель</b>", akb.admin_menu(svc.cfg.is_bot_admin(cb.from_user.id)))
+
+
+@router.message(DirectMsg.content)
+async def dm_content(message: Message, state: FSMContext, svc: Services) -> None:
+    payload = extract_payload(message)
+    if payload is None:
+        await message.answer("❌ Поддерживаются текст, фото, видео и документ.", reply_markup=akb.dm_cancel())
+        return
+    try:
+        validate_payload(payload)
+    except ServiceError as e:
+        await message.answer(e.user_message, reply_markup=akb.dm_cancel())
+        return
+    data = await state.get_data()
+    uid, team_name = data.get("dm_to"), data.get("dm_team", "")
+    await state.clear()
+    header = f"✉️ <b>Сообщение от организатора турнира</b>\nКапитану команды «{esc(team_name)}»:"
+    ok = await deliver_personal(svc.bot, uid, header, payload, akb.dm_reply(message.from_user.id))
+    is_main = svc.cfg.is_bot_admin(message.from_user.id)
+    if ok:
+        await message.answer(f"✅ Сообщение доставлено капитану «{esc(team_name)}».\nОтвет придёт сюда же.",
+                             reply_markup=akb.admin_menu(is_main))
+    else:
+        await message.answer("⚠️ Не удалось доставить: капитан заблокировал бота или ещё не запускал его.",
+                             reply_markup=akb.admin_menu(is_main))

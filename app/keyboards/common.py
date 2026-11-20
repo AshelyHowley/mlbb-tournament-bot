@@ -91,6 +91,20 @@ def subscribe(cfg: Config, retry_cb: str = "sub:check", cancel_cb: str = "reg:ca
     ])
 
 
+def subscribe_links(cfg: Config) -> InlineKeyboardMarkup:
+    return kb([
+        [B(text="📢 Подписаться на канал", url=cfg.channel_url)],
+        [B(text="💬 Вступить в чат", url=cfg.chat_url)],
+    ])
+
+
+def need_username(retry_cb: str, cancel_cb: str = "menu") -> InlineKeyboardMarkup:
+    return kb([
+        [B(text="🔄 Я создал username — проверить", callback_data=retry_cb)],
+        [B(text="❌ Отмена", callback_data=cancel_cb)],
+    ])
+
+
 def my_reg_menu(can_unregister: bool = False) -> InlineKeyboardMarkup:
     rows = []
     if can_unregister:

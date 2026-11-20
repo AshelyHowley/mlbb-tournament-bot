@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.context import Services
-from app.handlers.common import format_solo, menu_view, show, tg_user
+from app.handlers.common import format_solo, menu_view, require_username, show, tg_user
 from app.keyboards import common as kbs
 from app.keyboards import team as tkb
 from app.services.errors import ServiceError, TeamNameTaken
@@ -64,6 +64,8 @@ async def reg_start(cb: CallbackQuery, state: FSMContext, svc: Services) -> None
     if not await svc.reg.is_open():
         await show(cb, "🔒 Регистрация сейчас закрыта.", kbs.back_to_menu())
         return
+    if not await require_username(cb, "reg:start"):
+        return
     await show(cb, "Выберите тип регистрации:", kbs.reg_type())
 
 
@@ -77,13 +79,13 @@ async def _guard(cb: CallbackQuery, state: FSMContext, svc: Services) -> bool:
     if not await svc.reg.is_open():
         await show(cb, "🔒 Регистрация сейчас закрыта.", kbs.back_to_menu())
         return False
-    return True
+    return await require_username(cb, cb.data)
 
 
 # ---------------------------------------------------------------- team flow: name -> creator role -> confirm -> create
 NAME_PROMPT = (
     "👥 <b>Регистрация команды</b>\n\nВ команде максимум 5 игроков, включая капитана. "
-    "Игроков вы пригласите по личной ссылке — их username не нужен.\n\nВведите <b>название команды</b> (2–40 символов):"
+    "Игроков вы пригласите по личной ссылке. У каждого игрока должен быть username в Telegram.\n\nВведите <b>название команды</b> (2–40 символов):"
 )
 
 
@@ -400,6 +402,8 @@ async def _team_created_screen(cb: CallbackQuery, svc: Services, view, role: str
 async def _finalize(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
     cur = await state.get_state()
     data = await state.get_data()
+    if not await require_username(cb, "reg:confirm", "reg:cancel"):  # removed it in the middle of the flow
+        return
     res = await svc.sub.check(cb.from_user.id)
     if not res.ok:
         await show(cb, sub_message(res), kbs.subscribe(svc.cfg))

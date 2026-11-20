@@ -12,6 +12,7 @@ from aiogram.client.session.base import BaseSession
 from aiogram.methods import (
     AnswerCallbackQuery,
     EditMessageText,
+    GetChat,
     GetChatMember,
     GetMe,
     SendDocument,
@@ -37,11 +38,13 @@ from app.bot.factory import build_dispatcher, build_services
 from app.config import Config
 from app.handlers import (
     admin_broadcast,
+    admin_checks,
     admin_deputies,
     admin_history,
     admin_matches,
     admin_notify,
     admin_panel,
+    contact,
     fallback,
     registration,
     reviews,
@@ -68,7 +71,8 @@ class FakeTelegram(BaseSession):
     def __init__(self):
         super().__init__()
         self.requests: list = []
-        self.chat_state: dict = {}  # chat_id -> "member" | "left" | Exception
+        self.chat_state: dict = {}  # chat_id or (chat_id, user_id) -> "member" | "left" | Exception
+        self.usernames: dict = {}  # user_id -> current Telegram username (getChat)
         self.fail_send: dict = {}  # chat_id -> Exception to raise instead of "sending" (retry-flow tests)
         self._n = 1000
 
@@ -88,11 +92,14 @@ class FakeTelegram(BaseSession):
             return Message(message_id=self._n, date=datetime.now(), chat=Chat(id=cid, type="private"),
                            text=getattr(method, "text", None), caption=getattr(method, "caption", None))
         if isinstance(method, GetChatMember):
-            st = self.chat_state.get(method.chat_id, "member")
+            st = self.chat_state.get((method.chat_id, method.user_id), self.chat_state.get(method.chat_id, "member"))
             if isinstance(st, Exception):
                 raise st
             user = User(id=method.user_id, is_bot=False, first_name="x")
             return ChatMemberMember(status="member", user=user) if st == "member" else ChatMemberLeft(status="left", user=user)
+        if isinstance(method, GetChat):
+            from types import SimpleNamespace
+            return SimpleNamespace(id=method.chat_id, username=self.usernames.get(method.chat_id))
         if isinstance(method, GetMe):
             return User(id=4242, is_bot=True, first_name="T", username="Test_Tournament_bot")
         if isinstance(method, AnswerCallbackQuery):
@@ -112,9 +119,10 @@ class Harness:
         self.bot = Bot(TOKEN, session=self.tg)
         self.svc = build_services(self.cfg, pool, self.bot)
         self.svc.bc.interval = 0
+        self.svc.check.interval = 0
         # never touch the real player_archive.db from tests
         self.svc.archive = PlayerArchive(str(Path(tempfile.mkdtemp()) / "player_archive.db"))
-        for r in (reviews, start, team, admin_panel, admin_matches, admin_notify, admin_deputies, admin_history, admin_broadcast, registration, fallback):
+        for r in (reviews, start, team, admin_panel, admin_matches, admin_notify, admin_deputies, admin_history, admin_broadcast, admin_checks, contact, registration, fallback):
             r.router._parent_router = None  # module-level routers are reused across per-test dispatchers
         self.dp = build_dispatcher(self.svc, pool)
         self._uid = 0

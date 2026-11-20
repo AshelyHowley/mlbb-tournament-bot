@@ -13,7 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.context import Services
-from app.handlers.common import format_team, menu_view, show, tg_user
+from app.handlers.common import format_team, menu_view, require_username, show, tg_user
 from app.keyboards import admin as akb
 from app.keyboards import common as ckb
 from app.keyboards import team as tkb
@@ -171,6 +171,8 @@ async def join_confirm(cb: CallbackQuery, state: FSMContext, svc: Services) -> N
     if blocked:
         await show(cb, blocked[0], blocked[1])
         return
+    if not await require_username(cb, cb.data):
+        return
     res = await svc.sub.check(user.id)
     if not res.ok:
         from app.handlers.registration import sub_message
@@ -248,6 +250,8 @@ async def captain_confirm(cb: CallbackQuery, svc: Services) -> None:
     blocked = _captain_status_message(peek)
     if blocked:
         await show(cb, blocked[0], blocked[1])
+        return
+    if not await require_username(cb, cb.data):
         return
     res = await svc.sub.check(user.id)
     if not res.ok:

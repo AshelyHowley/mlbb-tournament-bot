@@ -12,7 +12,7 @@ from tests.helpers import make_team, member_of, team_token
 pytestmark = pytest.mark.db
 
 CAP = (10, "cap0001")          # captain of make_team(pool, 1)
-P2 = (2, None)                 # a player without username
+P2 = (2, "player02")
 P3 = (3, "player03")
 
 
