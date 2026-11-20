@@ -305,20 +305,11 @@ async def teams_menu(cb: CallbackQuery, svc: Services) -> None:
 
 
 @router.callback_query(F.data == "adm:roster")
-async def roster_pick_style(cb: CallbackQuery) -> None:
-    from app.services import teams_roster
-    await cb.answer()
-    await show(cb, "📝 <b>Список команд</b>\nНазвания и звёзды всех команд. Выберите оформление:",
-               akb.roster_styles(teams_roster.STYLES))
-
-
-@router.callback_query(F.data.regexp(r"^adm:roster:(cup|table|cards)$"))
 async def roster_show(cb: CallbackQuery, svc: Services) -> None:
     from app.services import teams_roster
     await cb.answer()
-    style = cb.data.rsplit(":", 1)[1]
-    pages = teams_roster.render(style, await teams_roster.load(svc.team.pool))
-    markup = akb.roster_styles(teams_roster.STYLES, style)
+    pages = teams_roster.render(await teams_roster.load(svc.team.pool))
+    markup = akb.to_teams()
     await show(cb, pages[0], markup if len(pages) == 1 else None)
     for i, page in enumerate(pages[1:], 1):
         await cb.bot.send_message(cb.from_user.id, page, reply_markup=markup if i == len(pages) - 1 else None)

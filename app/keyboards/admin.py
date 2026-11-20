@@ -54,13 +54,6 @@ def to_teams() -> InlineKeyboardMarkup:
     return kb([[B(text="◀️ К командам", callback_data="adm:teams")]])
 
 
-def roster_styles(styles: dict[str, str], current: str | None = None) -> InlineKeyboardMarkup:
-    """Выбор оформления списка команд; текущее отмечено галочкой."""
-    row = [B(text=("✅ " if key == current else "") + title, callback_data=f"adm:roster:{key}")
-           for key, title in styles.items()]
-    return kb([row, [B(text="◀️ К командам", callback_data="adm:teams")]])
-
-
 def teams_list(rows: Sequence, page: int, last: int) -> InlineKeyboardMarkup:
     items = [[B(text=r["name"][:40], callback_data=f"adm:tc:{r['id']}")] for r in rows]
     return kb(items + [

@@ -204,7 +204,7 @@ async def test_registration_closed_ui(h, pool):
 
 
 # ------------------------------------------------------------------ admin authorisation
-ADMIN_CALLBACKS = ["adm", "adm:teams", "adm:roster", "adm:roster:cup", "adm:t:0", "adm:tc:1", "adm:td:1", "adm:tdok:1", "adm:s:0", "adm:sdok:10", "adm:reg:set:0",
+ADMIN_CALLBACKS = ["adm", "adm:teams", "adm:roster", "adm:t:0", "adm:tc:1", "adm:td:1", "adm:tdok:1", "adm:s:0", "adm:sdok:10", "adm:reg:set:0",
                    "adm:m", "mt:new", "mt:ok", "mt:wok:1:1", "mt:dok:1", "adm:bc", "bc:aud:all", "bc:send:1", "adm:reg"]
 
 
@@ -255,7 +255,7 @@ async def test_admin_teams_list_card_and_confirmed_delete(h, pool):
     assert "не найдена" in h.last()
 
 
-async def test_admin_teams_menu_and_roster_styles(h, pool):
+async def test_admin_teams_menu_and_roster(h, pool):
     await make_team(pool, 1, "Alpha")
     await make_team(pool, 2, "Beta <x>")
     h.clear()
@@ -265,21 +265,17 @@ async def test_admin_teams_menu_and_roster_styles(h, pool):
     assert {"📝 Создать список команд", "👥 Список команд", "🎲 Формирование команд",
             "🗑 Удалить все команды"} <= set(h.buttons())
     await h.press(ADMIN_ID, "theadmin", "adm:roster")
-    assert {"🏆 Турнирный", "📋 Таблица", "✨ Карточки"} <= set(h.buttons())
-    for style in ("cup", "table", "cards"):
-        await h.press(ADMIN_ID, "theadmin", f"adm:roster:{style}")
-        assert "Alpha" in h.last() and "Beta &lt;x&gt;" in h.last() and "⭐" in h.last()
-    assert "✅ ✨ Карточки" in h.buttons()
+    assert "УЧАСТНИКИ ТУРНИРА" in h.last() and "Alpha" in h.last() and "Beta &lt;x&gt;" in h.last()
+    assert "◀️ К командам" in h.buttons()
 
 
 def test_roster_render_splits_long_lists():
     from app.services.teams_roster import TeamRow, render
-    teams = [TeamRow(f"Team{i:03}", i, 5) for i in range(300)]
-    for style in ("cup", "table", "cards"):
-        pages = render(style, teams)
-        assert len(pages) > 1 and all(len(p) <= 3800 for p in pages)
-        assert all(p.count("<pre>") == p.count("</pre>") for p in pages)
-    assert render("cup", []) == ["ℹ️ Пока нет ни одной команды."]
+    teams = [TeamRow(f"Team{i:03}", i) for i in range(300)]
+    pages = render(teams)
+    assert len(pages) > 1 and all(len(p) <= 3800 for p in pages)
+    assert pages[0].count("🥇") == 1 and "Team299" in pages[0]  # most stars first
+    assert render([]) == ["ℹ️ Пока нет ни одной команды."]
 
 
 async def test_admin_registration_toggle_idempotent(h, pool):
