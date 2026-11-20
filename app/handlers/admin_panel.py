@@ -558,39 +558,100 @@ async def quick_bracket(cb: CallbackQuery, svc: Services) -> None:
     await show(cb, f"✅ Сетка отправлена: {sent} из {len(ids)}", akb.to_admin())
 
 
+def _seat_line(i: int, seat, captain_id: int) -> str:
+    p = seat.player
+    crown = "👑 " if p.user_id == captain_id else ""
+    off = " ⚠️ не своя роль" if seat.off_role else ""
+    return f"{i}. {crown}{person(p.full_name, p.username, p.user_id)} — {seat.role}{off}, ⭐ {p.stars}"
+
+
+def _chunks(blocks: list[str], limit: int = 3800) -> list[str]:
+    pages, cur = [], ""
+    for b in blocks:
+        if cur and len(cur) + len(b) + 2 > limit:
+            pages.append(cur)
+            cur = ""
+        cur = f"{cur}\n\n{b}" if cur else b
+    return pages + [cur] if cur else pages
+
+
 @router.callback_query(F.data == "rnd:solo")
-async def randomize_solo(cb: CallbackQuery, svc: Services) -> None:
+async def solo_teams_preview(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer()
+    from app.services import solo_teams
+    p = await solo_teams.preview(svc.team.pool)
+    back = B(text="◀️ К командам", callback_data="adm:t:0")
+    if p["teams"] == 0:
+        await show(cb, f"ℹ️ Соло-игроков: <b>{p['solos']}</b>. Для одной команды нужно минимум {solo_teams.TEAM_SIZE}.",
+                   InlineKeyboardMarkup(inline_keyboard=[[back]]))
+        return
+    lines = [
+        "🎲 <b>Сборка команд из соло</b>", "",
+        f"👤 Соло-игроков: <b>{p['solos']}</b>",
+        f"🛡 Будет собрано команд: <b>{p['teams']}</b> (по {solo_teams.TEAM_SIZE} игроков)",
+        f"⏳ Останутся без места: <b>{p['left']}</b>", "",
+        "Роли подбираются по заявкам, звёзды распределяются поровну, капитан — игрок с наибольшим "
+        "числом звёзд. Места достаются тем, кто зарегистрировался раньше.",
+        "Игроки остаются в соло-регистрации — команды можно пересобрать.",
+        "Уведомления получат только те, кто попал в команду.",
+    ]
+    if p["built"]:
+        lines += ["", f"♻️ Уже собранные из соло команды ({p['built']}) будут расформированы и собраны заново."]
+    if p["matches"]:
+        lines.append(f"⚠️ С ними есть матчи в сетке ({p['matches']}) — эти матчи будут удалены.")
+    await show(cb, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=[
+        [B(text="✅ Собрать команды", callback_data="rnd:solo:go")], [back],
+    ]))
+
+
+@router.callback_query(F.data == "rnd:solo:go")
+async def solo_teams_assemble(cb: CallbackQuery, svc: Services) -> None:
     await cb.answer("Собираю команды...")
-    import random
-    from app.repositories.teams import insert_team, add_member
-    from app.utils.text import new_invite_token
-    async with svc.team.pool.acquire() as conn:
-        async with conn.transaction():
-            solos = await conn.fetch(
-                "SELECT s.user_id, s.username, s.role, u.full_name "
-                "FROM solo_players s JOIN users u ON u.telegram_id = s.user_id "
-                "WHERE s.tournament_id = (SELECT id FROM tournaments WHERE status = 'active')"
-            )
-            if len(solos) < 5:
-                await show(cb, f"ℹ️ Соло-игроков: {len(solos)}. Нужно минимум 5.", akb.to_admin())
-                return
-            random.shuffle(solos)
-            created = 0
-            while len(solos) >= 5:
-                group = [solos.pop() for _ in range(5)]
-                captain = group[0]
-                name = f"Team {created + 1}"
-                name_norm = name.lower().replace(" ", "")
-                tid = await insert_team(
-                    conn, name, name_norm, captain["user_id"], captain["user_id"],
-                    new_invite_token(), None,
-                )
-                for i, p in enumerate(group):
-                    await add_member(conn, tid, p["user_id"], is_captain=(i == 0))
-                    await conn.execute("DELETE FROM solo_players WHERE user_id = $1", p["user_id"])
-                created += 1
-            left = len(solos)
-    await show(cb, f"✅ Создано команд: <b>{created}</b>\nОсталось соло: <b>{left}</b>", akb.to_admin())
+    from app.services import solo_teams
+    plan, disbanded = await solo_teams.assemble(svc.team.pool)
+    if not plan.teams:
+        await show(cb, f"ℹ️ Соло-игроков меньше {solo_teams.TEAM_SIZE} — команды не собраны.", akb.to_admin())
+        return
+    head = [f"✅ Собрано команд: <b>{len(plan.teams)}</b>"]
+    if disbanded:
+        head.append(f"♻️ Расформировано прежних: <b>{disbanded}</b>")
+    blocks = ["\n".join(head)]
+    for t in plan.teams:
+        blocks.append("\n".join(
+            [f"🛡 <b>{esc(t.name)}</b> — ⭐ {t.total}"]
+            + [_seat_line(i, s, t.captain.user_id) for i, s in enumerate(t.seats, 1)]
+        ))
+    if plan.leftovers:
+        blocks.append("\n".join(
+            [f"⏳ <b>Без места ({len(plan.leftovers)})</b> — остаются в соло:"]
+            + [f"• {person(p.full_name, p.username, p.user_id)} — {', '.join(r for r in solo_teams.ROLES if r in p.roles)}, ⭐ {p.stars}"
+               for p in plan.leftovers]
+        ))
+    else:
+        blocks.append("👌 Место досталось всем соло-игрокам.")
+
+    sent = failed = 0
+    for t in plan.teams:
+        roster = "\n".join(_seat_line(i, s, t.captain.user_id) for i, s in enumerate(t.seats, 1))
+        for s in t.seats:
+            lines = [f"🎲 <b>Вы попали в команду «{esc(t.name)}»!</b>", "", f"🎯 Ваша роль: <b>{s.role}</b>"]
+            if s.player.user_id == t.captain.user_id:
+                lines.append("👑 Вы — капитан команды: у вас больше всего звёзд.")
+            else:
+                lines.append(f"👑 Капитан: {person(t.captain.full_name, t.captain.username, t.captain.user_id)}")
+            lines += [f"⭐ Звёзды команды: {t.total}", "", "👥 <b>Состав:</b>", roster]
+            try:
+                await svc.bot.send_message(s.player.user_id, "\n".join(lines))
+                sent += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.05)  # stay under Telegram's broadcast rate limit
+    blocks.append(f"📨 Уведомлено игроков: {sent}" + (f" (не доставлено: {failed})" if failed else ""))
+
+    pages = _chunks(blocks)
+    await show(cb, pages[0], akb.to_admin() if len(pages) == 1 else None)
+    for i, page in enumerate(pages[1:], 1):
+        await cb.bot.send_message(cb.from_user.id, page, reply_markup=akb.to_admin() if i == len(pages) - 1 else None)
 
 
 @router.callback_query(F.data == "br:new")

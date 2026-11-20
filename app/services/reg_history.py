@@ -24,6 +24,8 @@ ACTIONS = {
     "unregister_solo": "🗑 Снялся с соло-регистрации",
     "admin_delete_team": "⛔ Команда снята админом",
     "admin_delete_solo": "⛔ Соло снят админом",
+    "solo_team": "🎲 Включён в команду из соло",
+    "solo_team_disband": "♻️ Команда из соло расформирована",
 }
 MEMBER_ROLES = {"captain": "👑 капитан", "member": "🎮 игрок", "registrar": "📝 регистратор"}
 

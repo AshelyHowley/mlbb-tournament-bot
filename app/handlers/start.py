@@ -128,6 +128,17 @@ async def cb_unregister(cb: CallbackQuery, svc: Services) -> None:
                 await log_registration(conn, uid, 'unregister_team', row["name"], team_id=row["id"],
                                        member_role="captain")
                 await conn.execute("DELETE FROM teams WHERE id = $1", row["id"])
+            # A solo player placed into a team built from solo players leaves that team too
+            # (a captain's team was already removed above)
+            auto = await conn.fetchrow(
+                "SELECT t.id, t.name FROM team_members m JOIN teams t ON t.id = m.team_id "
+                "WHERE m.user_id = $1 AND m.is_captain = 0 AND t.from_solo = 1 AND t.tournament_id = "
+                "(SELECT id FROM tournaments WHERE status = 'active')",
+                uid,
+            )
+            if auto:
+                await conn.execute("DELETE FROM team_members WHERE team_id = $1 AND user_id = $2", auto["id"], uid)
+                await log_registration(conn, uid, 'leave', auto["name"], team_id=auto["id"])
             # Solo case: remove solo registration
             if await conn.execute(
                 "DELETE FROM solo_players WHERE user_id = $1 AND tournament_id = "
