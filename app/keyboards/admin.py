@@ -12,7 +12,7 @@ from app.utils.text import person_plain
 
 def admin_menu(is_main_admin: bool = True) -> InlineKeyboardMarkup:
     rows = [
-        [B(text="👥 Список команд", callback_data="adm:t:0"), B(text="👤 Соло-игроки", callback_data="adm:s:0")],
+        [B(text="👥 Команды", callback_data="adm:teams"), B(text="👤 Соло-игроки", callback_data="adm:s:0")],
         [B(text="🏆 Турнирная сетка", callback_data="adm:bracket")],
         [B(text="📢 Рассылка", callback_data="adm:bc"), B(text="🔐 Регистрация", callback_data="adm:reg")],
         [B(text="🔎 Проверка участников", callback_data="chk:menu")],
@@ -40,14 +40,32 @@ def pager(prefix: str, page: int, last: int) -> list[B]:
     return row
 
 
+def teams_menu() -> InlineKeyboardMarkup:
+    return kb([
+        [B(text="📝 Создать список команд", callback_data="adm:roster")],
+        [B(text="👥 Список команд", callback_data="adm:t:0")],
+        [B(text="🎲 Формирование команд", callback_data="rnd:solo")],
+        [B(text="🗑 Удалить все команды", callback_data="adm:tdelall")],
+        [B(text="◀️ Админ-панель", callback_data="adm")],
+    ])
+
+
+def to_teams() -> InlineKeyboardMarkup:
+    return kb([[B(text="◀️ К командам", callback_data="adm:teams")]])
+
+
+def roster_styles(styles: dict[str, str], current: str | None = None) -> InlineKeyboardMarkup:
+    """Выбор оформления списка команд; текущее отмечено галочкой."""
+    row = [B(text=("✅ " if key == current else "") + title, callback_data=f"adm:roster:{key}")
+           for key, title in styles.items()]
+    return kb([row, [B(text="◀️ К командам", callback_data="adm:teams")]])
+
+
 def teams_list(rows: Sequence, page: int, last: int) -> InlineKeyboardMarkup:
     items = [[B(text=r["name"][:40], callback_data=f"adm:tc:{r['id']}")] for r in rows]
     return kb(items + [
-        [B(text="🎲 Собрать команды из соло", callback_data="rnd:solo")],
-        [B(text="🗑 Удалить все команды", callback_data="adm:tdelall")],
-        [B(text="➕ 16 тестовых", callback_data="adm:tadd16"), B(text="🎲 Случайные", callback_data="adm:taddrnd")],
         pager("adm:t", page, last),
-        [B(text="◀️ Админ-панель", callback_data="adm")],
+        [B(text="◀️ К командам", callback_data="adm:teams")],
     ])
 
 

@@ -297,6 +297,33 @@ async def db_restore_apply(cb: CallbackQuery, state: FSMContext, svc: Services) 
 
 
 # ------------------------------------------------------------------ teams
+@router.callback_query(F.data == "adm:teams")
+async def teams_menu(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer()
+    total, *_ = await svc.admin.teams_page(0)
+    await show(cb, f"👥 <b>Команды</b>\nВсего: <b>{total}</b>", akb.teams_menu())
+
+
+@router.callback_query(F.data == "adm:roster")
+async def roster_pick_style(cb: CallbackQuery) -> None:
+    from app.services import teams_roster
+    await cb.answer()
+    await show(cb, "📝 <b>Список команд</b>\nНазвания и звёзды всех команд. Выберите оформление:",
+               akb.roster_styles(teams_roster.STYLES))
+
+
+@router.callback_query(F.data.regexp(r"^adm:roster:(cup|table|cards)$"))
+async def roster_show(cb: CallbackQuery, svc: Services) -> None:
+    from app.services import teams_roster
+    await cb.answer()
+    style = cb.data.rsplit(":", 1)[1]
+    pages = teams_roster.render(style, await teams_roster.load(svc.team.pool))
+    markup = akb.roster_styles(teams_roster.STYLES, style)
+    await show(cb, pages[0], markup if len(pages) == 1 else None)
+    for i, page in enumerate(pages[1:], 1):
+        await cb.bot.send_message(cb.from_user.id, page, reply_markup=markup if i == len(pages) - 1 else None)
+
+
 @router.callback_query(F.data.regexp(r"^adm:t:\d{1,6}$"))
 async def teams_list(cb: CallbackQuery, svc: Services) -> None:
     await cb.answer()
@@ -580,7 +607,7 @@ async def solo_teams_preview(cb: CallbackQuery, svc: Services) -> None:
     await cb.answer()
     from app.services import solo_teams
     p = await solo_teams.preview(svc.team.pool)
-    back = B(text="◀️ К командам", callback_data="adm:t:0")
+    back = B(text="◀️ К командам", callback_data="adm:teams")
     if p["teams"] == 0:
         await show(cb, f"ℹ️ Соло-игроков: <b>{p['solos']}</b>. Для одной команды нужно минимум {solo_teams.TEAM_SIZE}.",
                    InlineKeyboardMarkup(inline_keyboard=[[back]]))
@@ -983,4 +1010,4 @@ async def teams_delete_all(cb: CallbackQuery, svc: Services) -> None:
             await conn.execute("UPDATE matches SET next_match_id = NULL WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active')")
             await conn.execute("DELETE FROM matches WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active')")
             await conn.execute("DELETE FROM teams WHERE tournament_id = (SELECT id FROM tournaments WHERE status = 'active')")
-    await show(cb, "✅ Все команды удалены.", akb.to_admin())
+    await show(cb, "✅ Все команды удалены.", akb.to_teams())
