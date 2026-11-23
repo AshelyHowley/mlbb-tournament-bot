@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-# # import asyncpg  # removed for SQLite  # removed for SQLite
 
 
 async def create_invite(conn, created_by: int, token: str) -> int:

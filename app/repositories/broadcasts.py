@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-# # import asyncpg  # removed for SQLite  # removed for SQLite
 
 
 async def create_draft(conn, admin_id: int, audience: str, ctype: str, text: Optional[str], file_id: Optional[str]) -> int:

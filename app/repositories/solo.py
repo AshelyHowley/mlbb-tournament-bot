@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-# # import asyncpg  # removed for SQLite  # removed for SQLite
 
 _ACTIVE = "(SELECT id FROM tournaments WHERE status = 'active')"
 

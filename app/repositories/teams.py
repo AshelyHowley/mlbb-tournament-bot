@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-# # import asyncpg  # removed for SQLite  # removed for SQLite
 
 _TEAM_SQL = (
     "SELECT t.id, t.name, t.invite_token, t.captain_invite_token, t.captain_id, t.created_by, t.created_at, "

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-# # import asyncpg  # removed for SQLite  # removed for SQLite
 
 _SELECT = "SELECT id, status, started_at, completed_at, completed_by, first_place_team_id, second_place_team_id, third_place_team_id, created_at FROM tournaments "
 

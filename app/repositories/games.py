@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# # import asyncpg  # removed for SQLite  # removed for SQLite
 
 
 async def lock_match(conn, match_id: int) -> None:
