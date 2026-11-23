@@ -13,3 +13,7 @@ logs/
 *.db
 *.db-wal
 *.db-shm
+
+# local junk
+*.zip
+test.png
