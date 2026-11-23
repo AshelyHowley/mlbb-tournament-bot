@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# # import asyncpg  # removed for SQLite  # removed for SQLite
 
 from app.repositories import deputies as deputies_repo
 from app.repositories import users as users_repo

@@ -3,7 +3,6 @@ Telegram chat/channel admin status is never consulted. Every check is server-sid
 on every call - a removed deputy loses rights on their very next request, not on their next login."""
 from __future__ import annotations
 
-# # import asyncpg  # removed for SQLite  # removed for SQLite
 
 from app.config import Config
 from app.repositories import deputies as deputies_repo

@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-# # import asyncpg  # removed for SQLite  # removed for SQLite
 
 from app.repositories import settings as settings_repo
 from app.repositories import solo as solo_repo

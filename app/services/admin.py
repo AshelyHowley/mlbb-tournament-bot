@@ -3,7 +3,6 @@
 from __future__ import annotations
 import sqlite3
 
-# # import asyncpg  # removed for SQLite  # removed for SQLite
 
 from app.repositories import matches as matches_repo
 from app.repositories import solo as solo_repo
