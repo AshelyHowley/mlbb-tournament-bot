@@ -108,7 +108,7 @@ class FakeTelegram(BaseSession):
 
 
 class Harness:
-    def __init__(self, pool, admin_id: int = ADMIN_ID, access_mode: str = "public", allowed=()):
+    def __init__(self, pool, admin_id: int = ADMIN_ID, access_mode: str = "public", allowed=(), storage=None):
         self.cfg = Config(
             bot_token=TOKEN, admin_id=admin_id, database_url="postgresql://u:p@h/db",
             channel_id="@yuliataetae", channel_url="https://t.me/yuliataetae",
@@ -124,7 +124,7 @@ class Harness:
         self.svc.archive = PlayerArchive(str(Path(tempfile.mkdtemp()) / "player_archive.db"))
         for r in (reviews, start, team, admin_panel, admin_matches, admin_notify, admin_deputies, admin_history, admin_broadcast, admin_checks, contact, registration, fallback):
             r.router._parent_router = None  # module-level routers are reused across per-test dispatchers
-        self.dp = build_dispatcher(self.svc, pool)
+        self.dp = build_dispatcher(self.svc, pool, storage)
         self._uid = 0
         self.capture = _ErrCapture()
         logging.getLogger("app.handlers.fallback").addHandler(self.capture)

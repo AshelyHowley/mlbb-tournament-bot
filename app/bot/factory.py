@@ -3,6 +3,7 @@ from __future__ import annotations
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.base import BaseStorage
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 
 from app.bot.context import Services
@@ -61,10 +62,10 @@ def build_services(cfg: Config, pool: object, bot: Bot) -> Services:
     )
 
 
-def build_dispatcher(svc: Services, pool: object) -> Dispatcher:
+def build_dispatcher(svc: Services, pool: object, storage: BaseStorage | None = None) -> Dispatcher:
     # SimpleEventIsolation serialises updates per (chat, user) *before* the FSM state is read, so a
     # double-tap on "confirm" can never run two handlers against the same state.
-    dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation(), svc=svc)
+    dp = Dispatcher(storage=storage or MemoryStorage(), events_isolation=SimpleEventIsolation(), svc=svc)
     # registered after aiogram's own UserContext/FSM middlewares, so event_from_user is available
     # The access gate goes first: nothing below it (DB tracking, filters, handlers) runs for a denied user.
     dp.update.outer_middleware(AccessMiddleware(svc.cfg))

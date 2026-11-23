@@ -41,6 +41,7 @@ async def run() -> int:
     bot = build_bot(cfg)
     svc = build_services(cfg, pool, bot)
     backup = None
+    storage = None
     try:
         applied = await migrate(pool)
         log.info("Migrations applied: %s", applied or "none")
@@ -54,7 +55,10 @@ async def run() -> int:
             log.warning("%d interrupted result notification(s) marked as 'interrupted'", stale_rn)
         me = await bot.get_me()
         log.info("Bot started as @%s", me.username)
-        dp = build_dispatcher(svc, pool)
+        from app.services.fsm_storage import SQLiteStorage, fsm_path_for
+        storage = SQLiteStorage(fsm_path_for(cfg.database_url))
+        log.info("Dialog state storage: %s", storage.path)
+        dp = build_dispatcher(svc, pool, storage)
         from app.services.db_backup import AutoBackup
         backup = AutoBackup(bot, cfg, svc.archive.path, cfg.backup_every_hours)
         backup.start()
@@ -72,6 +76,8 @@ async def run() -> int:
         await svc.bc.shutdown()
         await svc.result_notify.shutdown()
         await bot.session.close()
+        if storage is not None:
+            await storage.close()
         await pool.close()
         log.info("Shutdown complete")
     return 0
