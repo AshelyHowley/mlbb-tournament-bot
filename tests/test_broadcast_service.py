@@ -147,3 +147,142 @@ async def test_shutdown_cancels_running_broadcast_and_marks_interrupted(pool):
     await asyncio.sleep(0.05)
     await svc.shutdown()
     assert (await svc.get(bid))["status"] == "interrupted"
+
+
+# ------------------------------------------------------------------ resume after interruption
+class RecBot(Bot):
+    """Also records reply_markup so the resume offer can be checked."""
+
+    def __init__(self, forbidden=()):
+        super().__init__(forbidden)
+        self.markups = []
+
+    async def send_message(self, chat_id, text, **kw):
+        await super().send_message(chat_id, text, **kw)
+        self.markups.append((chat_id, kw.get("reply_markup")))
+
+    send_photo = send_video = send_message
+
+
+async def _interrupt_after(pool, svc, bid, n_done):
+    """Simulates a broadcast cut off after the first n recipients were sent to."""
+    async with pool.acquire() as c:
+        row = await bc_repo.get(c, bid)
+        rec = await bc_repo.recipients(c, row["audience"], exclude=row["admin_id"])
+        await bc_repo.claim(c, bid, len(rec))
+        for uid in rec[:n_done]:
+            await bc_repo.record_delivery(c, bid, uid, "ok")
+    assert await svc.recover() == 1
+    return rec
+
+
+async def test_restart_offers_resume_and_resume_skips_already_sent(pool):
+    await seed(pool)
+    bot = RecBot()
+    svc = BroadcastService(pool, bot, interval=0)
+    bid, _ = await svc.prepare(42, "all", Payload("text", "hello"))
+    rec = await _interrupt_after(pool, svc, bid, 3)
+
+    assert await svc.notify_interrupted() == 1
+    offer = [t for uid, t in bot.sent if uid == 42][-1]
+    assert f"#{bid} прервана" in offer and "доставлено 3 из" in offer
+    markup = [m for uid, m in bot.markups if uid == 42][-1]
+    assert markup.inline_keyboard[0][0].callback_data == f"bc:resume:{bid}"
+    assert await svc.notify_interrupted() == 0  # told once
+
+    bot.sent.clear()
+    left = await svc.resume(bid, 42)
+    assert left == len(rec) - 3
+    await asyncio.gather(*svc._tasks)
+    got = [uid for uid, t in bot.sent if t == "hello"]
+    assert sorted(got) == sorted(rec[3:])  # nobody gets it twice
+    row = await svc.get(bid)
+    assert (row["status"], row["sent"], row["total"]) == ("done", len(rec), len(rec))
+    assert "завершена" in [t for uid, t in bot.sent if uid == 42][-1]
+
+
+async def test_resume_double_click_and_owner_only(pool):
+    await seed(pool)
+    svc = BroadcastService(pool, RecBot(), interval=0.2)
+    bid, _ = await svc.prepare(42, "all", Payload("text", "hello"))
+    await _interrupt_after(pool, svc, bid, 1)
+    with pytest.raises(NotFound):
+        await svc.resume(bid, 43)
+    await svc.resume(bid, 42)
+    with pytest.raises(Conflict):
+        await svc.resume(bid, 42)
+    await svc.shutdown()
+
+
+async def test_resume_includes_newcomers(pool):
+    await seed(pool)
+    bot = RecBot()
+    svc = BroadcastService(pool, bot, interval=0)
+    bid, _ = await svc.prepare(42, "solo", Payload("text", "hello"))
+    await _interrupt_after(pool, svc, bid, 2)  # both solo players already reached
+    await RegistrationService(pool).register_solo(TgUser(12, "solo0003", "S3"), "GOLD")
+    assert await svc.resume(bid, 42) == 1
+    await asyncio.gather(*svc._tasks)
+    assert [uid for uid, t in bot.sent if t == "hello"] == [12]
+
+
+async def test_resume_with_nobody_left_closes_as_done(pool):
+    await seed(pool)
+    svc = BroadcastService(pool, RecBot(), interval=0)
+    bid, _ = await svc.prepare(42, "solo", Payload("text", "hello"))
+    await _interrupt_after(pool, svc, bid, 2)
+    assert await svc.resume(bid, 42) == 0
+    assert (await svc.get(bid))["status"] == "done"
+
+
+async def test_old_untracked_broadcast_cannot_be_resumed(pool):
+    await seed(pool)
+    svc = BroadcastService(pool, RecBot(), interval=0)
+    bid, _ = await svc.prepare(42, "all", Payload("text", "hello"))
+    async with pool.acquire() as c:
+        await c.execute("UPDATE broadcasts SET status='interrupted', tracked=0 WHERE id=$1", bid)
+    assert await svc.notify_interrupted() == 0
+    with pytest.raises(Conflict):
+        await svc.resume(bid, 42)
+
+
+async def test_shutdown_keeps_exact_counts_then_resume_finishes(pool):
+    await seed(pool)
+    bot = RecBot()
+    svc = BroadcastService(pool, bot, interval=0.05)
+    bid, total = await svc.prepare(42, "all", Payload("text", "hello"))
+    await svc.start(bid, 42)
+    await asyncio.sleep(0.12)
+    await svc.shutdown()
+    first = [uid for uid, t in bot.sent if t == "hello"]
+    row = await svc.get(bid)
+    assert row["status"] == "interrupted" and row["sent"] == len(first) and 0 < len(first) < total
+
+    svc2 = BroadcastService(pool, bot, interval=0)  # "after restart"
+    assert await svc2.notify_interrupted() == 1
+    await svc2.resume(bid, 42)
+    await asyncio.gather(*svc2._tasks)
+    got = [uid for uid, t in bot.sent if t == "hello"]
+    assert len(got) == len(set(got)) == total
+    assert (await svc2.get(bid))["status"] == "done"
+
+
+async def test_resume_buttons_through_bot(pool):
+    from tests.harness import ADMIN_ID, Harness
+    await seed(pool)
+    h = Harness(pool)
+    bid, _ = await h.svc.bc.prepare(ADMIN_ID, "all", Payload("text", "hello"))
+    rec = await _interrupt_after(pool, h.svc.bc, bid, 2)
+    await h.press(7, "stranger1", f"bc:resume:{bid}")  # not staff: ignored
+    assert (await h.svc.bc.get(bid))["status"] == "interrupted"
+    await h.press(ADMIN_ID, "boss", f"bc:noresume:{bid}")
+    assert "не будет дослана" in h.last()
+    await h.press(ADMIN_ID, "boss", f"bc:resume:{bid}")
+    assert f"Осталось получателей: <b>{len(rec) - 2}</b>" in h.last()
+    await asyncio.gather(*h.svc.bc._tasks)
+    assert (await h.svc.bc.get(bid))["status"] == "done"
+    h.clear()
+    await h.press(ADMIN_ID, "boss", f"bc:resume:{bid}")
+    assert "уже досылается или завершена" in h.last()
+    assert not h.errors
+    h.close()

@@ -55,6 +55,12 @@ async def run() -> int:
             log.warning("%d interrupted result notification(s) marked as 'interrupted'", stale_rn)
         me = await bot.get_me()
         log.info("Bot started as @%s", me.username)
+        try:
+            offered = await svc.bc.notify_interrupted()
+            if offered:
+                log.warning("offered to resume %d interrupted broadcast(s)", offered)
+        except Exception:
+            log.exception("could not offer to resume interrupted broadcasts")
         from app.services.fsm_storage import SQLiteStorage, fsm_path_for
         storage = SQLiteStorage(fsm_path_for(cfg.database_url))
         log.info("Dialog state storage: %s", storage.path)

@@ -142,6 +142,30 @@ async def bc_send(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
     await show(cb, f"📤 Рассылка #{bid} запущена. Получателей: <b>{total}</b>.\nПо завершении пришлю отчёт.", akb.admin_menu())
 
 
+@router.callback_query(F.data.regexp(r"^bc:resume:\d{1,18}$"))
+async def bc_resume(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer()
+    bid = parse_int(cb.data.split(":")[2])
+    is_main = svc.cfg.is_bot_admin(cb.from_user.id)
+    try:
+        left = await svc.bc.resume(bid, cb.from_user.id)
+    except ServiceError as e:
+        await show(cb, e.user_message, akb.admin_menu(is_main))
+        return
+    if left:
+        await show(cb, f"▶️ Рассылка #{bid} досылается. Осталось получателей: <b>{left}</b>.\nПо завершении пришлю отчёт.",
+                   akb.admin_menu(is_main))
+    else:
+        await show(cb, f"✅ Рассылка #{bid}: все получатели уже охвачены, досылать некому.", akb.admin_menu(is_main))
+
+
+@router.callback_query(F.data.regexp(r"^bc:noresume:\d{1,18}$"))
+async def bc_noresume(cb: CallbackQuery, svc: Services) -> None:
+    await cb.answer("Хорошо")
+    bid = parse_int(cb.data.split(":")[2])
+    await show(cb, f"✖️ Рассылка #{bid} не будет дослана.", akb.admin_menu(svc.cfg.is_bot_admin(cb.from_user.id)))
+
+
 # ------------------------------------------------------------------ personal message to one captain
 DM_PAGE = 10
 

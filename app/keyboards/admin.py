@@ -193,6 +193,11 @@ def bc_confirm(bid: int) -> InlineKeyboardMarkup:
     ])
 
 
+def bc_resume(bid: int) -> InlineKeyboardMarkup:
+    return kb([[B(text="▶️ Дослать оставшимся", callback_data=f"bc:resume:{bid}"),
+                B(text="✖️ Не досылать", callback_data=f"bc:noresume:{bid}")]])
+
+
 # ---- personal messages to captains ----
 def dm_captains(rows: Sequence, page: int, last: int) -> InlineKeyboardMarkup:
     items = [[B(text=f"{r['name'][:24]} — {person_plain(r['full_name'], r['username'], r['captain_id'])[:30]}",

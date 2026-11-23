@@ -5,7 +5,6 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Sequence
 
-# # import asyncpg  # removed for SQLite  # removed for SQLite
 from aiogram import Bot
 from aiogram.exceptions import (
     TelegramAPIError,
@@ -96,7 +95,14 @@ async def deliver(
         else:
             st.failed += 1
         if on_result:
-            await on_result(uid, outcome)
+            # the delivery log must not lose a message that already went out, even on shutdown
+            # (a resumed broadcast would send it twice otherwise)
+            write = asyncio.ensure_future(on_result(uid, outcome))
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                await write
+                raise
         if on_progress and i % PROGRESS_EVERY == 0:
             await on_progress(st)
         if interval:
@@ -168,45 +174,114 @@ class BroadcastService:
                 claimed = await bc_repo.claim(conn, bid, len(recipients))
         if claimed is None:
             raise Conflict("ℹ️ Эта рассылка уже отправлена или отменена.")
-        payload = Payload(row["content_type"], row["text"], row["file_id"])
-        task = asyncio.create_task(self._run(bid, admin_id, recipients, payload), name=f"broadcast-{bid}")
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._spawn(bid, admin_id, recipients, Payload(row["content_type"], row["text"], row["file_id"]), Stats())
         return len(recipients)
 
-    async def _run(self, bid: int, admin_id: int, recipients: list[int], payload: Payload) -> None:
+    async def resume(self, bid: int, admin_id: int) -> int:
+        """Sends an interrupted broadcast to everyone in its audience (as it is now) who has not been tried yet.
+        Returns how many people are left; 0 means everyone was already reached and it is closed as done."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await bc_repo.get(conn, bid)
+                if not row or row["admin_id"] != admin_id:
+                    raise NotFound("Рассылка")
+                if not row["tracked"]:
+                    raise Conflict("ℹ️ Эту рассылку нельзя дослать: она запускалась до обновления бота.")
+                done = await bc_repo.attempted(conn, bid)
+                rest = [u for u in await bc_repo.recipients(conn, row["audience"], exclude=admin_id) if u not in done]
+                claimed = await bc_repo.claim_resume(conn, bid, admin_id, len(done) + len(rest))
+                base = self._base(await bc_repo.delivery_counts(conn, bid))
+                if claimed is not None and not rest:
+                    await bc_repo.finish(conn, bid, "done", base.sent, base.failed, base.blocked)
+        if claimed is None:
+            raise Conflict("ℹ️ Эта рассылка уже досылается или завершена.")
+        if rest:
+            self._spawn(bid, admin_id, rest, Payload(row["content_type"], row["text"], row["file_id"]), base)
+        return len(rest)
+
+    @staticmethod
+    def _base(counts: dict[str, int]) -> Stats:
+        return Stats(sent=counts.get("ok", 0), failed=counts.get("failed", 0), blocked=counts.get("blocked", 0))
+
+    def _spawn(self, bid: int, admin_id: int, recipients: list[int], payload: Payload, base: Stats) -> None:
+        task = asyncio.create_task(self._run(bid, admin_id, recipients, payload, base), name=f"broadcast-{bid}")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _run(self, bid: int, admin_id: int, recipients: list[int], payload: Payload, base: Stats) -> None:
         stats = Stats()
 
+        def total(st: Stats) -> Stats:
+            return Stats(base.sent + st.sent, base.failed + st.failed, base.blocked + st.blocked)
+
         async def progress(st: Stats) -> None:
+            t = total(st)
             async with self.pool.acquire() as conn:
-                await bc_repo.progress(conn, bid, st.sent, st.failed, st.blocked)
+                await bc_repo.progress(conn, bid, t.sent, t.failed, t.blocked)
 
         async def blocked(uid: int) -> None:
             async with self.pool.acquire() as conn:
                 await users_repo.mark_blocked(conn, uid)
 
+        async def result(uid: int, outcome: str) -> None:
+            async with self.pool.acquire() as conn:
+                await bc_repo.record_delivery(conn, bid, uid, outcome)
+
         try:
             stats = await deliver(
-                self.bot, recipients, payload, interval=self.interval, on_progress=progress, on_blocked=blocked
+                self.bot, recipients, payload, interval=self.interval,
+                on_progress=progress, on_blocked=blocked, on_result=result,
             )
             status = "done"
         except asyncio.CancelledError:
-            status = "interrupted"
-            await asyncio.shield(self._finish(bid, status, stats))
+            # shutdown: the sender is told after the restart (notify_interrupted) and offered to resume
+            await asyncio.shield(self._finish_from_log(bid))
             raise
         except Exception:
             log.exception("broadcast %s crashed", bid)
-            status = "interrupted"
-        await self._finish(bid, status, stats)
+            await self._finish_from_log(bid)
+            await self._offer_resume(bid, admin_id)
+            return
+        final = total(stats)
+        await self._finish(bid, status, final)
+        if status == "done":
+            text = (f"📢 Рассылка #{bid} завершена.\n"
+                    f"Доставлено: {final.sent}\nБот заблокирован: {final.blocked}\nОшибок: {final.failed}")
+            await self._tell(admin_id, text)
+
+    async def _finish_from_log(self, bid: int) -> None:
+        """Marks the broadcast interrupted with exact counters taken from the per-recipient log."""
+        async with self.pool.acquire() as conn:
+            st = self._base(await bc_repo.delivery_counts(conn, bid))
+            await bc_repo.finish(conn, bid, "interrupted", st.sent, st.failed, st.blocked)
+
+    async def _tell(self, admin_id: int, text: str, reply_markup=None) -> bool:
         try:
-            await self.bot.send_message(
-                admin_id,
-                f"📢 Рассылка #{bid} {'завершена' if status == 'done' else 'прервана'}.\n"
-                f"Доставлено: {stats.sent}\nБот заблокирован: {stats.blocked}\nОшибок: {stats.failed}",
-                parse_mode=None,
-            )
+            await self.bot.send_message(admin_id, text, parse_mode=None, reply_markup=reply_markup)
+            return True
         except TelegramAPIError:
-            log.warning("could not notify admin about broadcast %s", bid)
+            log.warning("could not notify admin %s about a broadcast", admin_id)
+            return False
+
+    async def _offer_resume(self, bid: int, admin_id: int) -> None:
+        from app.keyboards.admin import bc_resume
+        async with self.pool.acquire() as conn:
+            row = await bc_repo.get(conn, bid)
+            st = self._base(await bc_repo.delivery_counts(conn, bid))
+        text = (f"📢 Рассылка #{bid} прервана: доставлено {st.sent} из {row['total']}.\n"
+                f"Бот заблокирован: {st.blocked}\nОшибок: {st.failed}\n\n"
+                "Дослать тем, кому ещё не отправлено? Повторно сообщение никто не получит.")
+        if await self._tell(admin_id, text, bc_resume(bid)):
+            async with self.pool.acquire() as conn:
+                await bc_repo.mark_notified(conn, bid)
+
+    async def notify_interrupted(self) -> int:
+        """Called at startup (after recover): tells each sender about broadcasts cut off by a restart."""
+        async with self.pool.acquire() as conn:
+            rows = await bc_repo.unnotified_interrupted(conn)
+        for r in rows:
+            await self._offer_resume(r["id"], r["admin_id"])
+        return len(rows)
 
     async def _finish(self, bid: int, status: str, st: Stats) -> None:
         async with self.pool.acquire() as conn:

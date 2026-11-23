@@ -18,7 +18,8 @@ async def get(conn, bid: int) -> Optional[dict]:
 async def claim(conn, bid: int, total: int) -> Optional[dict]:
     """draft -> sending exactly once. Second caller gets None."""
     return await conn.fetchrow(
-        "UPDATE broadcasts SET status='sending', total=$2, started_at=datetime('now') WHERE id=$1 AND status='draft' RETURNING *",
+        "UPDATE broadcasts SET status='sending', total=$2, tracked=1, started_at=datetime('now') "
+        "WHERE id=$1 AND status='draft' RETURNING *",
         bid, total,
     )
 
@@ -36,6 +37,45 @@ async def finish(conn, bid: int, status: str, sent: int, failed: int, blocked: i
         "UPDATE broadcasts SET status=$2, sent=$3, failed=$4, blocked=$5, finished_at=datetime('now') WHERE id=$1 AND status='sending'",
         bid, status, sent, failed, blocked,
     )
+
+
+async def claim_resume(conn, bid: int, admin_id: int, total: int) -> Optional[dict]:
+    """interrupted -> sending exactly once, only for the sender and only if deliveries were logged."""
+    return await conn.fetchrow(
+        "UPDATE broadcasts SET status='sending', total=$3, notified=1, finished_at=NULL "
+        "WHERE id=$1 AND admin_id=$2 AND status='interrupted' AND tracked=1 RETURNING *",
+        bid, admin_id, total,
+    )
+
+
+async def record_delivery(conn, bid: int, uid: int, outcome: str) -> None:
+    await conn.execute(
+        "INSERT INTO broadcast_deliveries (broadcast_id, recipient_id, outcome) VALUES ($1,$2,$3) "
+        "ON CONFLICT (broadcast_id, recipient_id) DO UPDATE SET outcome = excluded.outcome",
+        bid, uid, outcome,
+    )
+
+
+async def attempted(conn, bid: int) -> set[int]:
+    rows = await conn.fetch("SELECT recipient_id FROM broadcast_deliveries WHERE broadcast_id = $1", bid)
+    return {r["recipient_id"] for r in rows}
+
+
+async def delivery_counts(conn, bid: int) -> dict[str, int]:
+    rows = await conn.fetch(
+        "SELECT outcome, COUNT(*) AS n FROM broadcast_deliveries WHERE broadcast_id = $1 GROUP BY outcome", bid
+    )
+    return {r["outcome"]: r["n"] for r in rows}
+
+
+async def unnotified_interrupted(conn) -> list[dict]:
+    return await conn.fetch(
+        "SELECT * FROM broadcasts WHERE status='interrupted' AND tracked=1 AND notified=0 ORDER BY id"
+    )
+
+
+async def mark_notified(conn, bid: int) -> None:
+    await conn.execute("UPDATE broadcasts SET notified=1 WHERE id=$1", bid)
 
 
 async def interrupt_stale(conn) -> int:
