@@ -24,6 +24,7 @@ from app.handlers import (
 )
 from app.middlewares.access import AccessMiddleware
 from app.middlewares.core import UserTrackMiddleware
+from app.middlewares.throttle import ThrottleMiddleware
 from app.services.admin import AdminService
 from app.services.broadcast import BroadcastService
 from app.services.deputy import DeputyService
@@ -69,6 +70,7 @@ def build_dispatcher(svc: Services, pool: object, storage: BaseStorage | None = 
     # registered after aiogram's own UserContext/FSM middlewares, so event_from_user is available
     # The access gate goes first: nothing below it (DB tracking, filters, handlers) runs for a denied user.
     dp.update.outer_middleware(AccessMiddleware(svc.cfg))
+    dp.update.outer_middleware(ThrottleMiddleware(svc.roles))  # flood limit before any DB write
     dp.update.outer_middleware(UserTrackMiddleware(pool))
     # order matters: deep-link /start (team) before plain /start & menu, admin routers gate themselves
     # (IsStaff, or IsAdmin for deputy management), fallback last
