@@ -66,80 +66,121 @@ class ResultNotifyService:
                 claimed = await rb_repo.claim(conn, rid, len(recipients))
         if claimed is None:
             raise Conflict("ℹ️ Эта рассылка уже отправлена или отменена.")
-        payload = Payload(row["content_type"], row["text"], row["file_id"])
-        task = asyncio.create_task(self._run(rid, created_by, recipients, payload), name=f"result-broadcast-{rid}")
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._spawn(rid, created_by, recipients, Payload(row["content_type"], row["text"], row["file_id"]))
         return len(recipients)
 
     async def retry_failed(self, rid: int, created_by: int) -> int:
+        """done: resend to those whose delivery failed. interrupted: send to everyone in the audience
+        it has not reached yet (never tried, or failed). Already delivered / blocked never get it twice."""
         async with self.pool.acquire() as conn:
-            row = await rb_repo.get(conn, rid)
-            if not row or row["created_by"] != created_by:
-                raise NotFound("Рассылка")
-            if row["status"] != "done":
-                raise Conflict("ℹ️ Повторить можно только уже завершённую рассылку.")
-            recipients = await rb_repo.failed_recipients(conn, rid)
-            if not recipients:
-                raise Conflict("ℹ️ Нет получателей для повтора.")
-            if not await rb_repo.start_retry(conn, rid):
-                raise Conflict("ℹ️ Повтор уже выполняется.")
-        payload = Payload(row["content_type"], row["text"], row["file_id"])
-        task = asyncio.create_task(self._run(rid, created_by, recipients, payload, is_retry=True), name=f"result-retry-{rid}")
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+            async with conn.transaction():
+                row = await rb_repo.get(conn, rid)
+                if not row or row["created_by"] != created_by:
+                    raise NotFound("Рассылка")
+                status = row["status"]
+                if status not in ("done", "interrupted"):
+                    raise Conflict("ℹ️ Повтор уже выполняется." if status == "sending"
+                                   else "ℹ️ Эта рассылка ещё не отправлялась.")
+                logged = await rb_repo.delivery_statuses(conn, rid)
+                if status == "done":
+                    recipients = [u for u, st in logged.items() if st == "failed"]
+                else:
+                    audience = await rb_repo.recipients(conn, row["kind"], row["context_id"])
+                    recipients = sorted(
+                        {u for u in audience if logged.get(u) not in ("sent", "blocked")}
+                        | {u for u, st in logged.items() if st == "failed"}
+                    )
+                if not recipients and status == "done":
+                    raise Conflict("ℹ️ Нет получателей для повтора.")
+                if not await rb_repo.start_retry(conn, rid, status):
+                    raise Conflict("ℹ️ Повтор уже выполняется.")
+                if recipients:
+                    await rb_repo.set_total(conn, rid, max(row["total"], len(set(logged) | set(recipients))))
+                else:  # interrupted, but everyone was already reached: just close it
+                    await self._finish_from_log(conn, rid, "done")
+        if not recipients:
+            raise Conflict("✅ Досылать некому: все получатели уже охвачены.")
+        self._spawn(rid, created_by, recipients, Payload(row["content_type"], row["text"], row["file_id"]))
         return len(recipients)
 
-    async def _run(self, rid: int, admin_id: int, recipients: list[int], payload: Payload, *, is_retry: bool = False) -> None:
-        sent = failed = blocked = 0
+    def _spawn(self, rid: int, admin_id: int, recipients: list[int], payload: Payload) -> None:
+        task = asyncio.create_task(self._run(rid, admin_id, recipients, payload), name=f"result-broadcast-{rid}")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
+    @staticmethod
+    async def _finish_from_log(conn, rid: int, status: str) -> tuple[int, int, int]:
+        """Closes the run with exact counters from the per-recipient log (never drift on interruption)."""
+        c = await rb_repo.delivery_counts(conn, rid)
+        sent, failed, blocked = c.get("sent", 0), c.get("failed", 0), c.get("blocked", 0)
+        await rb_repo.finish(conn, rid, status, sent, failed, blocked)
+        return sent, failed, blocked
+
+    async def _run(self, rid: int, admin_id: int, recipients: list[int], payload: Payload) -> None:
         async def on_result(uid: int, outcome: str) -> None:
-            nonlocal sent, failed, blocked
-            if outcome == "ok":
-                sent += 1
-                status = "sent"
-            elif outcome == "blocked":
-                blocked += 1
-                status = "blocked"
-            else:
-                failed += 1
-                status = "failed"
+            status = {"ok": "sent", "blocked": "blocked"}.get(outcome, "failed")
             async with self.pool.acquire() as conn:
                 await rb_repo.record_delivery(conn, rid, uid, status)
                 if status == "blocked":
                     await users_repo.mark_blocked(conn, uid)
 
+        async def close(status: str) -> tuple[int, int, int]:
+            async with self.pool.acquire() as conn:
+                return await self._finish_from_log(conn, rid, status)
+
         try:
             await deliver(self.bot, recipients, payload, interval=self.interval, on_result=on_result)
             status = "done"
         except asyncio.CancelledError:
-            status = "interrupted"
+            # shutdown: the author is told after the restart (notify_interrupted) and offered to resume
+            await asyncio.shield(close("interrupted"))
             raise
         except Exception:
             log.exception("result broadcast %s crashed", rid)
             status = "interrupted"
-        finally:
-            async with self.pool.acquire() as conn:
-                if is_retry:
-                    # merge into the totals already recorded on the first run
-                    row = await rb_repo.get(conn, rid)
-                    total_sent, total_failed, total_blocked = (row["sent"] or 0) + sent, failed, (row["blocked"] or 0) + blocked
-                    await rb_repo.finish(conn, rid, status, total_sent, total_failed, total_blocked)
-                else:
-                    total_sent, total_failed, total_blocked = sent, failed, blocked
-                    await rb_repo.finish(conn, rid, status, sent, failed, blocked)
+        total_sent, total_failed, total_blocked = await close(status)
+        if status == "interrupted":
+            await self._offer_resume(rid, admin_id)
+            return
         markup = None
         if total_failed:
             markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Повторить неотправленным", callback_data=f"sn:retry:{rid}")]])
         try:
             await self.bot.send_message(
                 admin_id,
-                f"📨 Рассылка #{rid} {'завершена' if status == 'done' else 'прервана'}.\n"
+                f"📨 Рассылка #{rid} завершена.\n"
                 f"Доставлено: {total_sent}\nБот заблокирован: {total_blocked}\nОшибок: {total_failed}",
                 reply_markup=markup,
             )
         except Exception:
             log.warning("could not notify %s about result broadcast %s", admin_id, rid)
+
+    async def _offer_resume(self, rid: int, admin_id: int) -> None:
+        async with self.pool.acquire() as conn:
+            row = await rb_repo.get(conn, rid)
+            c = await rb_repo.delivery_counts(conn, rid)
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Дослать", callback_data=f"sn:retry:{rid}")]])
+        try:
+            await self.bot.send_message(
+                admin_id,
+                f"📨 Рассылка #{rid} прервана: доставлено {c.get('sent', 0)} из {row['total']}.\n"
+                f"Бот заблокирован: {c.get('blocked', 0)}\nОшибок: {c.get('failed', 0)}\n\n"
+                "Дослать тем, кому ещё не доставлено? Повторно сообщение никто не получит.",
+                reply_markup=markup,
+            )
+        except Exception:
+            log.warning("could not offer to resume result broadcast %s to %s", rid, admin_id)
+            return
+        async with self.pool.acquire() as conn:
+            await rb_repo.mark_notified(conn, rid)
+
+    async def notify_interrupted(self) -> int:
+        """Called at startup (after recover): tells each author about notifications cut off by a restart."""
+        async with self.pool.acquire() as conn:
+            rows = await rb_repo.unnotified_interrupted(conn)
+        for r in rows:
+            await self._offer_resume(r["id"], r["created_by"])
+        return len(rows)
 
     async def shutdown(self) -> None:
         for t in list(self._tasks):

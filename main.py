@@ -56,7 +56,7 @@ async def run() -> int:
         me = await bot.get_me()
         log.info("Bot started as @%s", me.username)
         try:
-            offered = await svc.bc.notify_interrupted()
+            offered = await svc.bc.notify_interrupted() + await svc.result_notify.notify_interrupted()
             if offered:
                 log.warning("offered to resume %d interrupted broadcast(s)", offered)
         except Exception:

@@ -54,8 +54,39 @@ async def finish(conn, rid: int, status: str, sent: int, failed: int, blocked: i
     )
 
 
-async def start_retry(conn, rid: int) -> bool:
-    return (await conn.execute("UPDATE result_broadcasts SET status='sending' WHERE id=$1 AND status='done'", rid)) == "UPDATE 1"
+async def start_retry(conn, rid: int, from_status: str) -> bool:
+    """done/interrupted -> sending exactly once (double-click safe)."""
+    r = await conn.execute(
+        "UPDATE result_broadcasts SET status='sending', notified=1, finished_at=NULL WHERE id=$1 AND status=$2",
+        rid, from_status,
+    )
+    return r == "UPDATE 1"
+
+
+async def delivery_statuses(conn, rid: int) -> dict[int, str]:
+    rows = await conn.fetch(
+        "SELECT recipient_id, status FROM result_broadcast_deliveries WHERE result_broadcast_id = $1", rid
+    )
+    return {r["recipient_id"]: r["status"] for r in rows}
+
+
+async def delivery_counts(conn, rid: int) -> dict[str, int]:
+    rows = await conn.fetch(
+        "SELECT status, COUNT(*) AS n FROM result_broadcast_deliveries WHERE result_broadcast_id = $1 GROUP BY status", rid
+    )
+    return {r["status"]: r["n"] for r in rows}
+
+
+async def set_total(conn, rid: int, total: int) -> None:
+    await conn.execute("UPDATE result_broadcasts SET total=$2 WHERE id=$1", rid, total)
+
+
+async def unnotified_interrupted(conn) -> list[dict]:
+    return await conn.fetch("SELECT * FROM result_broadcasts WHERE status='interrupted' AND notified=0 ORDER BY id")
+
+
+async def mark_notified(conn, rid: int) -> None:
+    await conn.execute("UPDATE result_broadcasts SET notified=1 WHERE id=$1", rid)
 
 
 async def interrupt_stale(conn) -> int:
