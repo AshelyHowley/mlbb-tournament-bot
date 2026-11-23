@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -13,7 +14,7 @@ from app.handlers.common import IsStaff, show
 from app.handlers.contact import deliver_personal, extract_payload
 from app.keyboards import admin as akb
 from app.repositories import teams as teams_repo
-from app.services.broadcast import AUDIENCES, Payload, send_payload, validate_payload
+from app.services.broadcast import AUDIENCES, MAX_ALBUM, Payload, send_payload, validate_payload
 from app.services.errors import ServiceError
 from app.utils.text import esc, parse_int, person
 
@@ -22,7 +23,9 @@ router = Router(name="admin_broadcast")
 router.message.filter(IsStaff())
 router.callback_query.filter(IsStaff())
 
-TYPE_TITLES = {"text": "текст", "photo": "фото", "video": "видео"}
+TYPE_TITLES = {"text": "текст", "photo": "фото", "video": "видео", "document": "документ", "album": "альбом"}
+CONTENT_HINT = "<b>текст</b>, <b>фото</b>, <b>видео</b>, <b>документ</b> или <b>альбом</b> (до 10 файлов, с подписью)"
+ALBUM_WAIT = 1.0  # seconds to collect every part of an album (Telegram sends them as separate messages)
 
 
 class Broadcast(StatesGroup):
@@ -46,7 +49,7 @@ async def bc_audience(cb: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(audience=aud)
     await show(
         cb,
-        f"Аудитория: <b>{esc(AUDIENCES[aud])}</b>\n\nОтправьте сообщение для рассылки: <b>текст</b>, <b>фото</b> или <b>видео</b> (с подписью). "
+        f"Аудитория: <b>{esc(AUDIENCES[aud])}</b>\n\nОтправьте сообщение для рассылки: {CONTENT_HINT}. "
         "Текст отправляется как есть, без форматирования.",
         akb.bc_cancel(),
     )
@@ -59,22 +62,67 @@ async def bc_abort(cb: CallbackQuery, state: FSMContext) -> None:
     await show(cb, "🛠 <b>Админ-панель</b>", akb.admin_menu())
 
 
-def _extract(message: Message) -> Optional[Payload]:
+_extract = extract_payload  # text / photo / video / document
+
+# album parts waiting to be assembled: (user id, media_group_id) -> messages
+_albums: dict[tuple[int, str], list[Message]] = {}
+_album_tasks: set[asyncio.Task] = set()
+
+
+def _album_item(message: Message) -> Optional[tuple[str, str]]:
     if message.photo:
-        return Payload("photo", message.caption, message.photo[-1].file_id)
+        return "photo", message.photo[-1].file_id
     if message.video:
-        return Payload("video", message.caption, message.video.file_id)
-    if message.text:
-        return Payload("text", message.text)
+        return "video", message.video.file_id
+    if message.document:
+        return "document", message.document.file_id
     return None
 
 
 @router.message(Broadcast.content)
 async def bc_content(message: Message, state: FSMContext, svc: Services) -> None:
+    if message.media_group_id:
+        key = (message.from_user.id, message.media_group_id)
+        if key in _albums:
+            _albums[key].append(message)
+            return
+        _albums[key] = [message]
+        task = asyncio.create_task(_finish_album(key, state, svc), name=f"album-{key[0]}")
+        _album_tasks.add(task)
+        task.add_done_callback(_album_tasks.discard)
+        return
     payload = _extract(message)
     if payload is None:
-        await message.answer("❌ Поддерживаются только текст, фото и видео. Отправьте другое сообщение.", reply_markup=akb.bc_cancel())
+        await message.answer("❌ Поддерживаются текст, фото, видео, документ и альбом. Отправьте другое сообщение.",
+                             reply_markup=akb.bc_cancel())
         return
+    await _make_draft(message, state, svc, payload)
+
+
+async def _finish_album(key: tuple[int, str], state: FSMContext, svc: Services) -> None:
+    try:
+        await asyncio.sleep(ALBUM_WAIT)
+        parts = sorted(_albums.pop(key, []), key=lambda m: m.message_id)
+        if not parts or await state.get_state() != Broadcast.content.state:
+            return  # cancelled or switched away while the album was arriving
+        first = parts[0]
+        if len(parts) > MAX_ALBUM:
+            await first.answer(f"❌ В альбоме больше {MAX_ALBUM} файлов. Отправьте альбом поменьше.", reply_markup=akb.bc_cancel())
+            return
+        items = tuple(i for i in map(_album_item, parts) if i)
+        caption = next((m.caption for m in parts if m.caption), None)
+        if len(items) != len(parts) or not items:
+            await first.answer("❌ В альбоме могут быть только фото, видео или документы.", reply_markup=akb.bc_cancel())
+            return
+        payload = (Payload("album", caption, items[0][1], items) if len(items) > 1
+                   else Payload(items[0][0], caption, items[0][1]))
+        await _make_draft(first, state, svc, payload)
+    except Exception:
+        log.exception("album assembly failed")
+        _albums.pop(key, None)
+
+
+async def _make_draft(message: Message, state: FSMContext, svc: Services, payload: Payload) -> None:
     data = await state.get_data()
     aud = data["audience"]
     try:
@@ -91,8 +139,9 @@ async def bc_content(message: Message, state: FSMContext, svc: Services) -> None
         return
     await state.set_state(Broadcast.confirm)
     await state.update_data(bid=bid)
+    kind = TYPE_TITLES[payload.content_type] + (f" ({len(payload.media)} файлов)" if payload.media else "")
     await message.answer(
-        f"📋 <b>Предпросмотр рассылки</b>\n\nТип: <b>{TYPE_TITLES[payload.content_type]}</b>\n"
+        f"📋 <b>Предпросмотр рассылки</b>\n\nТип: <b>{kind}</b>\n"
         f"Получатели: <b>{esc(AUDIENCES[aud])}</b>\nКоличество: <b>{count}</b>\n\nСообщение будет выглядеть так:"
     )
     try:
@@ -116,7 +165,7 @@ async def bc_edit(cb: CallbackQuery, state: FSMContext, svc: Services) -> None:
         return
     await _drop_draft(svc, bid)
     await state.set_state(Broadcast.content)
-    await show(cb, "✏️ Отправьте новое сообщение для рассылки (текст, фото или видео):", akb.bc_cancel())
+    await show(cb, f"✏️ Отправьте новое сообщение для рассылки: {CONTENT_HINT}.", akb.bc_cancel())
 
 
 @router.callback_query(Broadcast.confirm, F.data.regexp(r"^bc:cancel:\d{1,18}$"))

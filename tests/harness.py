@@ -14,6 +14,7 @@ from aiogram.methods import (
     EditMessageText,
     GetChat,
     GetChatMember,
+    SendMediaGroup,
     GetMe,
     SendDocument,
     SendMessage,
@@ -91,6 +92,10 @@ class FakeTelegram(BaseSession):
                 raise self.fail_send[cid]
             return Message(message_id=self._n, date=datetime.now(), chat=Chat(id=cid, type="private"),
                            text=getattr(method, "text", None), caption=getattr(method, "caption", None))
+        if isinstance(method, SendMediaGroup):
+            if method.chat_id in self.fail_send:
+                raise self.fail_send[method.chat_id]
+            return []
         if isinstance(method, GetChatMember):
             st = self.chat_state.get((method.chat_id, method.user_id), self.chat_state.get(method.chat_id, "member"))
             if isinstance(st, Exception):
@@ -148,10 +153,11 @@ class Harness:
         self._uid += 1
         await self.dp.feed_update(self.bot, Update(update_id=self._uid, message=self._msg(uid, username, text, chat_type)))
 
-    async def media(self, uid: int, username: Optional[str], kind: str, file_id: str, caption: Optional[str] = None) -> None:
+    async def media(self, uid: int, username: Optional[str], kind: str, file_id: str, caption: Optional[str] = None,
+                    media_group_id: Optional[str] = None) -> None:
         """Feeds a synthetic photo/video/document Message (no real file upload/network involved)."""
         self._uid += 1
-        extra = {"caption": caption}
+        extra = {"caption": caption, "media_group_id": media_group_id}
         if kind == "photo":
             extra["photo"] = [PhotoSize(file_id=file_id, file_unique_id=file_id + "u", width=90, height=90)]
         elif kind == "video":

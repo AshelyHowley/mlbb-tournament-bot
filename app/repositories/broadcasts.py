@@ -4,10 +4,12 @@ from typing import Optional
 
 
 
-async def create_draft(conn, admin_id: int, audience: str, ctype: str, text: Optional[str], file_id: Optional[str]) -> int:
+async def create_draft(conn, admin_id: int, audience: str, ctype: str, text: Optional[str], file_id: Optional[str],
+                       media: Optional[str] = None) -> int:
     return await conn.fetchval(
-        "INSERT INTO broadcasts (admin_id, audience, content_type, text, file_id) VALUES ($1,$2,$3,$4,$5) RETURNING id",
-        admin_id, audience, ctype, text, file_id,
+        "INSERT INTO broadcasts (admin_id, audience, content_type, text, file_id, media) "
+        "VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        admin_id, audience, ctype, text, file_id, media,
     )
 
 

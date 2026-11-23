@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Sequence
 
 from aiogram import Bot
+from aiogram.types import InputMediaDocument, InputMediaPhoto, InputMediaVideo
 from aiogram.exceptions import (
     TelegramAPIError,
     TelegramForbiddenError,
@@ -24,14 +26,30 @@ AUDIENCES = {"captains": "👑 Капитаны", "solo": "👤 Соло", "all"
 MAX_TEXT, MAX_CAPTION = 4096, 1024
 SEND_INTERVAL = 0.05  # ~20 msg/s, below Telegram's ~30 msg/s broadcast limit
 MAX_ATTEMPTS = 3
+MAX_ALBUM = 10  # Telegram's limit for one media group
 PROGRESS_EVERY = 20
 
 
 @dataclass(frozen=True)
 class Payload:
-    content_type: str  # text | photo | video | document
+    content_type: str  # text | photo | video | document | album
     text: Optional[str]
     file_id: Optional[str] = None
+    media: tuple = ()  # album only: ((type, file_id), ...), type is photo | video | document
+
+    @property
+    def weight(self) -> int:
+        """How many messages Telegram counts for one delivery (an album counts every item)."""
+        return max(1, len(self.media))
+
+    def media_json(self) -> Optional[str]:
+        return json.dumps([list(m) for m in self.media]) if self.media else None
+
+
+def payload_from_row(row) -> Payload:
+    media = row["media"] if "media" in row.keys() else None
+    return Payload(row["content_type"], row["text"], row["file_id"],
+                   tuple(tuple(m) for m in json.loads(media)) if media else ())
 
 
 @dataclass
@@ -52,8 +70,21 @@ def validate_payload(p: Payload) -> None:
             raise ValidationError("❌ Нет файла.")
         if p.text and len(p.text) > MAX_CAPTION:
             raise ValidationError(f"❌ Подпись длиннее {MAX_CAPTION} символов.")
+    elif p.content_type == "album":
+        kinds = [t for t, _ in p.media]
+        if not 2 <= len(p.media) <= MAX_ALBUM:
+            raise ValidationError(f"❌ В альбоме должно быть от 2 до {MAX_ALBUM} файлов.")
+        if any(t not in ("photo", "video", "document") for t in kinds) or any(not f for _, f in p.media):
+            raise ValidationError("❌ В альбоме могут быть только фото, видео или документы.")
+        if "document" in kinds and set(kinds) != {"document"}:
+            raise ValidationError("❌ Документы нельзя смешивать в одном альбоме с фото и видео.")
+        if p.text and len(p.text) > MAX_CAPTION:
+            raise ValidationError(f"❌ Подпись длиннее {MAX_CAPTION} символов.")
     else:
         raise ValidationError("❌ Поддерживаются текст, фото, видео и документ.")
+
+
+_INPUT_MEDIA = {"photo": InputMediaPhoto, "video": InputMediaVideo, "document": InputMediaDocument}
 
 
 async def send_payload(bot: Bot, chat_id: int, p: Payload, reply_markup=None) -> None:
@@ -65,6 +96,10 @@ async def send_payload(bot: Bot, chat_id: int, p: Payload, reply_markup=None) ->
         await bot.send_photo(chat_id, p.file_id, caption=p.text, parse_mode=None, **kw)
     elif p.content_type == "video":
         await bot.send_video(chat_id, p.file_id, caption=p.text, parse_mode=None, **kw)
+    elif p.content_type == "album":  # a media group cannot carry buttons; the caption goes on the first item
+        items = [_INPUT_MEDIA[t](media=f, caption=p.text if i == 0 else None, parse_mode=None)
+                 for i, (t, f) in enumerate(p.media)]
+        await bot.send_media_group(chat_id, items)
     else:
         await bot.send_document(chat_id, p.file_id, caption=p.text, parse_mode=None, **kw)
 
@@ -148,7 +183,8 @@ class BroadcastService:
             raise ValidationError("❌ Неизвестная аудитория.")
         validate_payload(payload)
         async with self.pool.acquire() as conn:
-            bid = await bc_repo.create_draft(conn, admin_id, audience, payload.content_type, payload.text, payload.file_id)
+            bid = await bc_repo.create_draft(conn, admin_id, audience, payload.content_type, payload.text, payload.file_id,
+                                             payload.media_json())
             count = len(await bc_repo.recipients(conn, audience, exclude=admin_id))
         return bid, count
 
@@ -174,7 +210,7 @@ class BroadcastService:
                 claimed = await bc_repo.claim(conn, bid, len(recipients))
         if claimed is None:
             raise Conflict("ℹ️ Эта рассылка уже отправлена или отменена.")
-        self._spawn(bid, admin_id, recipients, Payload(row["content_type"], row["text"], row["file_id"]), Stats())
+        self._spawn(bid, admin_id, recipients, payload_from_row(row), Stats())
         return len(recipients)
 
     async def resume(self, bid: int, admin_id: int) -> int:
@@ -196,7 +232,7 @@ class BroadcastService:
         if claimed is None:
             raise Conflict("ℹ️ Эта рассылка уже досылается или завершена.")
         if rest:
-            self._spawn(bid, admin_id, rest, Payload(row["content_type"], row["text"], row["file_id"]), base)
+            self._spawn(bid, admin_id, rest, payload_from_row(row), base)
         return len(rest)
 
     @staticmethod
@@ -229,7 +265,7 @@ class BroadcastService:
 
         try:
             stats = await deliver(
-                self.bot, recipients, payload, interval=self.interval,
+                self.bot, recipients, payload, interval=self.interval * payload.weight,  # stay under the flood limit
                 on_progress=progress, on_blocked=blocked, on_result=result,
             )
             status = "done"
